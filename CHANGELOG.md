@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Web studio**: `voiceover studio` serves a local Gradio web app (optional extra
+  `pip install "ai-voiceover-studio[webui]"`) to write or load a script, pick engine, language and
+  speed, generate and listen to the voiceover with its SRT and segment table, voice single lines,
+  browse the engine's voices and render the MP4 when ffmpeg is installed.
 - Use-case guides with runnable commands in `docs/use-cases/` (faceless YouTube, Shorts / Reels /
   TikTok, explainer and recap narration, multilingual dubbing, podcast and audiobook snippets).
 - Spanish example script `examples/script.es.md`.

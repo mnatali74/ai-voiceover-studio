@@ -1,0 +1,240 @@
+"""Gradio web studio: write a script, pick engine, language and speed, listen.
+
+    voiceover studio --host 127.0.0.1 --port 7860
+
+Needs the optional web extra::
+
+    pip install "ai-voiceover-studio[webui]"
+
+The UI is a thin layer over :class:`voiceover_studio.studio.Studio` and
+:func:`voiceover_studio.video.render_video`; every handler can also be called
+directly from Python for tests.
+"""
+from __future__ import annotations
+
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from .errors import VoiceoverError
+from .providers import available_providers
+
+LANGUAGES = ["auto", "en", "it", "es", "fr", "de", "pt", "nl", "ru", "uk", "pl",
+             "tr", "ar", "hi", "zh", "ja", "ko"]
+
+DEFAULT_SCRIPT = """# Welcome to AI Voiceover Studio
+
+Write your narration here, one paragraph per idea.
+
+[NARRATOR] Speaker tags like this give each speaker its own voice.
+
+Add a pause with `[pause 500]`, or **bold** words to stress them in the captions.
+"""
+
+
+def _examples_dir() -> Optional[Path]:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "examples"
+        if candidate.is_dir() and any(candidate.glob("*.md")):
+            return candidate
+    return None
+
+
+def example_scripts() -> List[str]:
+    folder = _examples_dir()
+    if folder is None:
+        return []
+    return sorted(str(p) for p in folder.glob("*.md"))
+
+
+def _engine_choices() -> List[str]:
+    return ["auto"] + available_providers()
+
+
+def new_session(workdir: Optional[Path] = None) -> Dict[str, Any]:
+    base = Path(workdir) if workdir else Path(tempfile.gettempdir()) / "voiceover-studio"
+    session = base / uuid.uuid4().hex[:12]
+    session.mkdir(parents=True, exist_ok=True)
+    return {"dir": session}
+
+
+def _voice_overrides(language: str, speed: float):
+    from .providers.base import Voice
+    return Voice(**{k: v for k, v in (("language", language), ("speed", speed))
+                    if v and v != "auto" and (k != "speed" or v != 1.0)})
+
+
+def generate_voiceover(script: str, provider: str, language: str, speed: float,
+                       gap: float, output_name: str, session: Dict[str, Any]
+                       ) -> Tuple[str, Optional[str], Optional[str], List[List[Any]]]:
+    """Render the script to audio + SRT. Returns (status, audio, srt, rows)."""
+    text = (script or "").strip()
+    if not text:
+        raise ValueError("Write a script first, or load an example.")
+    from .studio import Studio
+    name = output_name.strip() or "voiceover.mp3"
+    if not Path(name).suffix:
+        name += ".mp3"
+    workdir = Path(session["dir"])
+    script_path = workdir / "script.md"
+    script_path.write_text(text, encoding="utf-8")
+    outdir = workdir / "voiceover"
+    studio = Studio(provider or "auto")
+    overrides = _voice_overrides(language, speed)
+    result = studio.render_script(script_path, outdir, output_name=name, gap=gap,
+                                  voice_overrides=overrides)
+    rows = [[s.index, s.speaker, s.voice, round(s.start, 2), round(s.end, 2), s.text]
+            for s in result.segments]
+    status = ("Rendered **%d** segments, **%.1f s** with the **%s** engine."
+              % (len(rows), result.duration, studio.provider.name))
+    return status, result.audio_path, result.srt_path, rows
+
+
+def say_line(text: str, provider: str, voice: str, language: str, speed: float,
+             session: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """Voice one piece of text. Returns (status, audio)."""
+    if not (text or "").strip():
+        raise ValueError("Write the text to speak.")
+    from .studio import Studio
+    studio = Studio(provider or "auto")
+    out = Path(session["dir"]) / ("say." + studio.provider.native_format)
+    overrides = _voice_overrides(language, speed)
+    opts = {"language": overrides.language, "speed": overrides.speed}
+    result = studio.say(text.strip(), voice or None, out,
+                        **{k: v for k, v in opts.items() if v is not None})
+    return "Voiced with **%s** (%s)." % (studio.provider.name, result.get("voice")), result["output"]
+
+
+def list_voices(provider: str, filter_text: str) -> Tuple[str, List[List[Any]]]:
+    """List voices of the engine. Returns (status, rows)."""
+    from .studio import Studio
+    studio = Studio(provider or "auto")
+    found, offset = [], 0
+    while True:
+        items, more = studio.provider.list_voices(100, offset)
+        found.extend(items)
+        offset += len(items)
+        if not (more and items) or offset >= 1000:
+            break
+    needle = (filter_text or "").strip().lower()
+    if needle:
+        found = [v for v in found
+                 if needle in ("%s %s %s" % (v.voice_id, v.name, v.language)).lower()]
+    rows = [[v.voice_id, v.language or "-", v.name] for v in found]
+    return "**%d** voices for the **%s** engine." % (len(rows), studio.provider.name), rows
+
+
+def render_video_clip(script: str, provider: str, language: str, speed: float,
+                      vertical: bool, style: str, music: str, session: Dict[str, Any]
+                      ) -> Tuple[str, Optional[str]]:
+    """Render the script to an MP4 (needs ffmpeg). Returns (status, video)."""
+    text = (script or "").strip()
+    if not text:
+        raise ValueError("Write a script first, or load an example.")
+    from .studio import Studio
+    from .video import render_video
+    workdir = Path(session["dir"])
+    script_path = workdir / "script.md"
+    script_path.write_text(text, encoding="utf-8")
+    studio = Studio(provider or "auto")
+    out = workdir / "video.mp4"
+    overrides = _voice_overrides(language, speed)
+    result = render_video(studio, None, script_path, out, size=(1080, 1920) if vertical else (1920, 1080),
+                          style="auto" if style == "auto" else style,
+                          music=music or None, voice_overrides=overrides)
+    status = ("Video **%.1f s**, %d shots, %s captions, engine **%s**."
+              % (result["duration"], result["shots"], result["style"], studio.provider.name))
+    return status, str(out)
+
+
+def build_ui(workdir: Optional[Path] = None) -> Any:
+    """Assemble the Gradio app (call ``.launch()`` on the result to serve it)."""
+    import gradio as gr
+
+    examples = example_scripts()
+    with gr.Blocks(title="AI Voiceover Studio") as app:
+        session = gr.State(new_session(workdir))
+        gr.Markdown("# AI Voiceover Studio\n"
+                    "Turn a script into narration, subtitles and video. "
+                    "Default engine: free Edge neural voices, no API key.",
+                    )
+
+        with gr.Tab("Voiceover"):
+            script = gr.Textbox(label="Script (Markdown)", value=DEFAULT_SCRIPT,
+                                lines=14, placeholder="# Title\n\n[NARRATOR] Your narration...")
+            with gr.Accordion("Examples", open=False):
+                example = gr.Dropdown(choices=examples, label="Load an example script",
+                                      interactive=True)
+            with gr.Row():
+                provider = gr.Dropdown(choices=_engine_choices(), value="auto", label="Engine")
+                language = gr.Dropdown(choices=LANGUAGES, value="auto", label="Language")
+                speed = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label="Speed")
+            with gr.Row():
+                gap = gr.Slider(0.0, 2.0, value=0.35, step=0.05,
+                                label="Pause between segments (s)")
+                output_name = gr.Textbox(value="voiceover.mp3", label="Output file name")
+            generate = gr.Button("Generate voiceover", variant="primary")
+            status = gr.Markdown()
+            audio = gr.Audio(label="Voiceover")
+            with gr.Row():
+                srt = gr.File(label="Subtitles (SRT)")
+            segments = gr.Dataframe(headers=["#", "Speaker", "Voice", "Start", "End", "Text"],
+                                    label="Segments")
+            if examples:
+                example.change(lambda path: Path(path).read_text(encoding="utf-8"),
+                               inputs=example, outputs=script)
+            generate.click(generate_voiceover,
+                           inputs=[script, provider, language, speed, gap, output_name, session],
+                           outputs=[status, audio, srt, segments])
+
+        with gr.Tab("Quick line"):
+            line = gr.Textbox(label="Text to speak", lines=3)
+            with gr.Row():
+                say_provider = gr.Dropdown(choices=_engine_choices(), value="auto", label="Engine")
+                say_voice = gr.Textbox(label="Voice id (optional, e.g. en-US-AvaNeural)")
+                say_language = gr.Dropdown(choices=LANGUAGES, value="auto", label="Language")
+                say_speed = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label="Speed")
+            say_button = gr.Button("Speak", variant="primary")
+            say_status = gr.Markdown()
+            say_audio = gr.Audio(label="Result")
+            say_button.click(say_line,
+                             inputs=[line, say_provider, say_voice, say_language, say_speed, session],
+                             outputs=[say_status, say_audio])
+
+        with gr.Tab("Voices"):
+            with gr.Row():
+                voices_provider = gr.Dropdown(choices=_engine_choices(), value="auto", label="Engine")
+                voices_filter = gr.Textbox(label="Filter (id, name or language)")
+                voices_button = gr.Button("List voices")
+            voices_status = gr.Markdown()
+            voices_table = gr.Dataframe(headers=["Voice id", "Language", "Name"], label="Voices")
+            voices_button.click(list_voices, inputs=[voices_provider, voices_filter],
+                                outputs=[voices_status, voices_table])
+
+        with gr.Tab("Video"):
+            gr.Markdown("Renders an MP4 with captions and optional music. Needs "
+                        "[ffmpeg](https://ffmpeg.org) on the machine running the studio.")
+            with gr.Row():
+                video_vertical = gr.Checkbox(value=False, label="Vertical 9:16 (Shorts / TikTok)")
+                video_style = gr.Dropdown(choices=["auto", "tiktok", "bold", "clean", "minimal", "box"],
+                                          value="auto", label="Caption style")
+                video_music = gr.Dropdown(choices=["", "ambient", "pulse"], value="",
+                                          label="Background music")
+            video_button = gr.Button("Render video", variant="primary")
+            video_status = gr.Markdown()
+            video_out = gr.Video(label="Video")
+            video_button.click(render_video_clip,
+                               inputs=[script, provider, language, speed, video_vertical,
+                                       video_style, video_music, session],
+                               outputs=[video_status, video_out])
+    return app
+
+
+def launch(host: str = "127.0.0.1", port: int = 7860, workdir: Optional[Path] = None,
+           **kwargs: Any) -> None:
+    """Build and serve the studio (blocking)."""
+    app = build_ui(workdir=workdir)
+    app.queue()
+    app.launch(server_name=host, server_port=port, **kwargs)

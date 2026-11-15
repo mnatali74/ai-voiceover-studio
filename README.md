@@ -40,6 +40,7 @@ That is the whole setup. You get `out/video.mp4` (1080p: B-roll with Ken Burns m
 ```bash
 voiceover script examples/script.md -o out/          # audio only: out/voiceover.mp3 + .srt + manifest.json
 voiceover say "Welcome back to the channel!" -o hello.mp3
+voiceover studio                                     # web UI: write, pick voice, listen (pip install ".[webui]")
 voiceover doctor                                      # ffmpeg, engines, keys, fonts
 ```
 
@@ -82,6 +83,7 @@ Each guide has a copy-paste command that runs on the bundled examples.
 - [Voice cloning](#voice-cloning-from-a-reference-clip)
 - [Subtitles (SRT)](#subtitles-srt-for-youtube)
 - [Faceless video](#faceless-youtube-video-and-shorts-from-a-script)
+- [Web studio](#web-studio)
 - [Use it from Python](#use-it-from-python)
 - [Use it from an AI coding agent](#use-it-from-an-ai-coding-agent)
 - [Architecture](#architecture)
@@ -90,6 +92,15 @@ Each guide has a copy-paste command that runs on the bundled examples.
 - [FAQ](#faq)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
+
+## Web studio
+
+Prefer a browser over the terminal? `voiceover studio` opens a local web app (Gradio, one optional
+extra: `pip install "ai-voiceover-studio[webui]"`) where you can write or paste a script, load one of
+the bundled examples, pick the engine, language and speed, then generate and listen to the voiceover
+with its SRT subtitles and segment table. A *Quick line* tab voices single sentences, a *Voices* tab
+browses the voices of the selected engine, and a *Video* tab renders the finished MP4 when ffmpeg is
+installed. It binds to localhost by default (`--host`, `--port` to change).
 
 ## Why this exists
 
