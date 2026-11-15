@@ -12,6 +12,7 @@ directly from Python for tests.
 """
 from __future__ import annotations
 
+import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -19,6 +20,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .errors import VoiceoverError
 from .providers import available_providers
+
+import gradio as gr
 
 LANGUAGES = ["auto", "en", "it", "es", "fr", "de", "pt", "nl", "ru", "uk", "pl",
              "tr", "ar", "hi", "zh", "ja", "ko"]
@@ -107,6 +110,49 @@ def say_line(text: str, provider: str, voice: str, language: str, speed: float,
     return "Voiced with **%s** (%s)." % (studio.provider.name, result.get("voice")), result["output"]
 
 
+SAMPLE_SENTENCES = {
+    "it": "Ciao, questa è una prova della voce selezionata.",
+    "en": "Hello, this is a quick preview of the selected voice.",
+    "es": "Hola, esta es una prueba rápida de la voz seleccionada.",
+    "fr": "Bonjour, ceci est un aperçu rapide de la voix sélectionnée.",
+    "de": "Hallo, dies ist eine kurze Probe der ausgewählten Stimme.",
+    "pt": "Olá, esta é uma prévia rápida da voz selecionada.",
+    "ru": "Привет, это быстрое прослушивание выбранного голоса.",
+    "zh": "你好，这是所选语音的快速试听。",
+    "ja": "こんにちは、選択した音声の簡単なプレビューです。",
+    "ko": "안녕하세요, 선택한 음성의 미리 듣기입니다.",
+    "ar": "مرحبًا، هذه معاينة سريعة للصوت المحدد.",
+    "hi": "नमस्ते, यह चुने गए आवाज़ का तेज़ पूर्वावलोकन है।",
+}
+
+
+def _sample_sentence(voice_id: str) -> str:
+    prefix = voice_id.strip().split("-")[0].lower()
+    return SAMPLE_SENTENCES.get(prefix, SAMPLE_SENTENCES["en"])
+
+
+def pick_voice(evt: Any, rows: List[List[Any]]) -> str:
+    """Fill the preview box with the voice id of the clicked table row."""
+    try:
+        return str(rows[evt.index[0]][0])
+    except (AttributeError, IndexError, TypeError):
+        return ""
+
+
+def test_voice(voice_id: str, provider: str, session: Dict[str, Any]
+               ) -> Tuple[str, Optional[str]]:
+    """Synthesize a short sample line with the selected voice. Returns (status, audio)."""
+    voice_id = (voice_id or "").strip()
+    if not voice_id:
+        raise ValueError("Click a voice in the table first.")
+    from .studio import Studio
+    studio = Studio(provider or "auto")
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", voice_id)
+    out = Path(session["dir"]) / ("preview_" + safe + "." + studio.provider.native_format)
+    result = studio.say(_sample_sentence(voice_id), voice_id, out)
+    return "Preview of **%s** with the **%s** engine." % (voice_id, studio.provider.name), result["output"]
+
+
 def list_voices(provider: str, filter_text: str) -> Tuple[str, List[List[Any]]]:
     """List voices of the engine. Returns (status, rows)."""
     from .studio import Studio
@@ -151,8 +197,6 @@ def render_video_clip(script: str, provider: str, language: str, speed: float,
 
 def build_ui(workdir: Optional[Path] = None) -> Any:
     """Assemble the Gradio app (call ``.launch()`` on the result to serve it)."""
-    import gradio as gr
-
     examples = example_scripts()
     with gr.Blocks(title="AI Voiceover Studio") as app:
         session = gr.State(new_session(workdir))
@@ -210,8 +254,18 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                 voices_button = gr.Button("List voices")
             voices_status = gr.Markdown()
             voices_table = gr.Dataframe(headers=["Voice id", "Language", "Name"], label="Voices")
+            with gr.Row():
+                preview_voice = gr.Textbox(label="Selected voice (click a row above)", interactive=False)
+                preview_button = gr.Button("Test voice")
+            preview_audio = gr.Audio(label="Preview")
             voices_button.click(list_voices, inputs=[voices_provider, voices_filter],
                                 outputs=[voices_status, voices_table])
+            def on_voice_select(evt: gr.SelectData, rows: List[List[Any]]) -> str:
+                return pick_voice(evt, rows)
+
+            voices_table.select(on_voice_select, inputs=voices_table, outputs=preview_voice)
+            preview_button.click(test_voice, inputs=[preview_voice, voices_provider, session],
+                                 outputs=[voices_status, preview_audio])
 
         with gr.Tab("Video"):
             gr.Markdown("Renders an MP4 with captions and optional music. Needs "

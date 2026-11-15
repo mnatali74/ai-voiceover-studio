@@ -5,8 +5,14 @@ import pytest
 
 pytest.importorskip("gradio")
 
-from voiceover_studio.webui import build_ui, example_scripts, generate_voiceover, list_voices, \
-    new_session, say_line  # noqa: E402
+from voiceover_studio.webui import _sample_sentence, build_ui, example_scripts, generate_voiceover, \
+    list_voices, new_session, pick_voice, say_line  # noqa: E402
+from voiceover_studio.webui import test_voice as preview_voice_line  # noqa: E402
+
+
+class _Evt:
+    def __init__(self, index):
+        self.index = index
 
 
 def test_build_ui(tmp_path):
@@ -52,3 +58,25 @@ def test_list_voices_with_dummy(tmp_path):
 def test_example_scripts_found():
     scripts = example_scripts()
     assert any(s.endswith("script.md") for s in scripts)
+
+def test_test_voice_with_dummy(tmp_path):
+    session = new_session(tmp_path)
+    status, audio = preview_voice_line("dummy-voice", "dummy", session)
+    assert audio and Path(audio).is_file()
+
+
+def test_test_voice_without_selection(tmp_path):
+    session = new_session(tmp_path)
+    with pytest.raises(ValueError):
+        preview_voice_line("", "dummy", session)
+
+
+def test_sample_sentence_matches_voice_language():
+    assert "prova" in _sample_sentence("it-IT-GiuseppeNeural")
+    assert _sample_sentence("xx-XX-Unknown") == _sample_sentence("en-US-AvaNeural")
+
+
+def test_pick_voice_uses_clicked_row():
+    rows = [["it-IT-GiuseppeNeural", "it", "Giuseppe"], ["en-US-AvaNeural", "en-US", "Ava"]]
+    assert pick_voice(_Evt([1, 0]), rows) == "en-US-AvaNeural"
+    assert pick_voice(_Evt(None), rows) == ""
