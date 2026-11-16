@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **AI Video resilience**: a scene whose asset cannot be found no longer aborts the whole plan —
+  it continues without a visual and renders as animated text, and the UI reports which scenes have
+  no asset. Pollinations generation retries with fresh seeds and reports rate limiting clearly;
+  keyless searches try progressively broader keyword sets.
+
 ### Added
 - **AI Video tab**: a one-line prompt becomes a finished video. An OpenRouter model plans the
   scenes (narration + search keywords), keyless sources (Wikimedia Commons, Openverse) provide the

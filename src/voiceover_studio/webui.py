@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .ai_video import DEFAULT_MODELS
-from .errors import VoiceoverError
+from .errors import ProviderError, VoiceoverError
 from .providers import available_providers
 
 import gradio as gr
@@ -229,9 +229,15 @@ def ai_plan(prompt: str, duration: float, language: str, orientation: str, model
              "ok" if s.verified else ("failed" if s.verified is False else "-")]
             for s in scenes]
     checked = sum(1 for s in scenes if s.verified)
-    status = ("Planned **%d** scenes. Assets: %s%s" % (
-        len(scenes), ", ".join(sorted({s.source for s in scenes})),
-        (". Vision check passed for %d/%d." % (checked, len(scenes))) if verify else "."))
+    sources = ", ".join(sorted({s.source for s in scenes if s.asset_path})) or "none"
+    status = "Planned **%d** scenes. Assets: %s." % (len(scenes), sources)
+    missing = [s.index + 1 for s in scenes if not s.asset_path]
+    if missing:
+        status += (" No asset for scene(s) %s — they will render as animated text. "
+                   "You can retry them with Regenerate."
+                   % ", ".join(str(i) for i in missing))
+    if verify:
+        status += " Vision check passed for %d/%d." % (checked, len(scenes))
     return status, gallery, rows
 
 
@@ -245,8 +251,13 @@ def ai_regenerate(scene_number: int, orientation: str, session: Dict[str, Any]
     scene = next((s for s in scenes if s.index == int(scene_number) - 1), None)
     if scene is None:
         raise ValueError("Pick a scene number from the list.")
-    path, source = generate_asset(scene.query, orientation,
-                                  Path(session["dir"]) / "ai_assets", scene.index)
+    try:
+        path, source = generate_asset(scene.query, orientation,
+                                      Path(session["dir"]) / "ai_assets", scene.index)
+    except ProviderError as exc:
+        return "Scene %d: generation failed — %s" % (scene.index + 1, str(exc)[:200]), \
+            [(s.asset_path, "Scene %d: %s (%s)" % (s.index + 1, s.query, s.source))
+             for s in scenes if s.asset_path]
     scene.asset_path, scene.source, scene.verified, scene.reason = str(path), source, None, ""
     session["scenes"] = [s.__dict__ for s in scenes]
     gallery = [(s.asset_path, "Scene %d: %s (%s)" % (s.index + 1, s.query, s.source))

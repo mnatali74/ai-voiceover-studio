@@ -120,6 +120,60 @@ def test_verify_failure_does_not_break_the_plan(fake, tmp_path, monkeypatch):
     assert scenes[0].verified is None and "skipped" in scenes[0].reason
 
 
+def test_generate_asset_retries_with_new_seed(fake, tmp_path):
+    fake.add("GET", "https://image.pollinations.ai/prompt/",
+             (503, {"error": "overloaded"}), (200, b"gen"))
+    path, source = generate_asset("space nebula", "landscape", tmp_path, 1, transport=fake)
+    assert source == "generated (pollinations)" and path.read_bytes() == b"gen"
+    poll_calls = [c for c in fake.calls if c["url"].startswith("https://image.pollinations.ai")]
+    assert len(poll_calls) == 2
+    assert poll_calls[0]["url"] != poll_calls[1]["url"]
+
+
+def test_generate_asset_reports_unavailable_service(fake, tmp_path):
+    fake.add("GET", "https://image.pollinations.ai/prompt/", (402, {"error": "payment"}))
+    with pytest.raises(ProviderError) as excinfo:
+        generate_asset("ocean", "landscape", tmp_path, 0, transport=fake)
+    assert "rate-limited" in str(excinfo.value)
+    poll_calls = [c for c in fake.calls if c["url"].startswith("https://image.pollinations.ai")]
+    assert len(poll_calls) == 3
+
+
+def test_find_asset_broadens_the_query(fake, tmp_path):
+    fake.add("GET", "https://commons.wikimedia.org/w/api.php", (200, {}))
+    fake.add("GET", "https://api.openverse.org/v1/images/",
+             (200, {"results": []}), (200, {"results": []}),
+             (200, {"results": [{"url": "https://images.example.org/hills.jpg"}]}))
+    fake.add("GET", "https://images.example.org/hills.jpg", (200, b"jpeg"))
+    path, source = find_asset("aerial vineyard sunset hills italy", "landscape",
+                              tmp_path, 0, transport=fake)
+    assert source == "openverse image"
+    openverse_queries = [c["url"] for c in fake.calls
+                         if c["url"].startswith("https://api.openverse.org")]
+    assert len(openverse_queries) == 3
+    assert "aerial+vineyard+sunset+hills+italy" in openverse_queries[0]
+    assert "aerial+vineyard+sunset" in openverse_queries[2]
+
+
+def test_plan_continues_when_a_scene_has_no_asset(fake, tmp_path):
+    from voiceover_studio.ai_video import plan_and_fetch
+    fake.add("GET", "https://commons.wikimedia.org/w/api.php", (200, {}))
+    fake.add("GET", "https://api.openverse.org/v1/images/", (200, {"results": []}))
+    fake.add("GET", "https://image.pollinations.ai/prompt/",
+             (402, {"error": "payment"}), (402, {"error": "payment"}),
+             (402, {"error": "payment"}), (200, b"img"))
+    scenes = plan_and_fetch(client_with(fake), "pyramids", tmp_path, verify=False,
+                            transport=fake)
+    assert len(scenes) == 2
+    assert scenes[0].asset_path is None and scenes[0].source == "none"
+    assert "no asset" in scenes[0].reason
+    assert scenes[1].asset_path is not None and scenes[1].source == "generated (pollinations)"
+    text = build_script(scenes)
+    assert "scene_00" not in text
+    assert "scene_01.jpg" in text
+    assert scenes[1].narration in text
+
+
 def test_build_script_includes_assets_and_narration():
     scenes = [Scene(0, "First line.", "q1", asset_path="assets/scene_00.jpg"),
               Scene(1, "Second line.", "q2")]

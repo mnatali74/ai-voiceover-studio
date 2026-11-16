@@ -191,6 +191,17 @@ def _pollinations_url(query: str, width: int, height: int) -> str:
             % (prompt, width, height, seed))
 
 
+def _query_variants(query: str) -> List[str]:
+    """Progressively broader keyword sets: the full query first, then shorter prefixes."""
+    words = query.split()
+    variants: List[str] = []
+    for n in range(len(words), 1, -1):
+        variant = " ".join(words[:n])
+        if variant not in variants:
+            variants.append(variant)
+    return variants[:3] or [query]
+
+
 def find_asset(query: str, orientation: str, workdir: Path, index: int,
                transport: Optional[Transport] = None) -> Tuple[Path, str]:
     """Find or generate one visual for a scene. Returns (path, source description)."""
@@ -210,40 +221,51 @@ def find_asset(query: str, orientation: str, workdir: Path, index: int,
             except ProviderError:
                 continue
 
-    for item in _openverse_search(query, orientation, transport):
-        url = item.get("url") or item.get("thumbnail")
-        if not url:
-            continue
-        try:
-            path = _download(url, workdir / ("scene_%02d.jpg" % index), transport)
-            return path, "openverse image"
-        except ProviderError:
-            continue
-
-    for info in _commons_search(query, "bitmap", transport):
-        if info.get("width", 0) >= 640:
+    for variant in _query_variants(query):
+        for item in _openverse_search(variant, orientation, transport):
+            url = item.get("url") or item.get("thumbnail")
+            if not url:
+                continue
             try:
-                path = _download(info["url"], workdir / ("scene_%02d.jpg" % index), transport)
-                return path, "wikimedia image"
+                path = _download(url, workdir / ("scene_%02d.jpg" % index), transport)
+                return path, "openverse image"
             except ProviderError:
                 continue
+
+    for variant in _query_variants(query):
+        for info in _commons_search(variant, "bitmap", transport):
+            if info.get("width", 0) >= 640:
+                try:
+                    path = _download(info["url"], workdir / ("scene_%02d.jpg" % index), transport)
+                    return path, "wikimedia image"
+                except ProviderError:
+                    continue
 
     return generate_asset(query, orientation, workdir, index, transport)
 
 
+POLLINATIONS_ATTEMPTS = 3
+
+
 def generate_asset(query: str, orientation: str, workdir: Path, index: int,
                    transport: Optional[Transport] = None) -> Tuple[Path, str]:
-    """Generate one image for the scene with Pollinations (keyless)."""
+    """Generate one image for the scene with Pollinations (keyless), retrying on failures."""
     transport = transport or urllib_transport
     workdir.mkdir(parents=True, exist_ok=True)
     query = (query or "").strip() or "abstract background"
     width, height = (720, 1280) if orientation == "portrait" else (1280, 720)
-    try:
-        path = _download(_pollinations_url(query, width, height),
-                         workdir / ("scene_%02d.jpg" % index), transport)
-        return path, "generated (pollinations)"
-    except ProviderError as exc:
-        raise ProviderError("No asset found for scene %d (%r): %s" % (index, query, exc)) from None
+    last: Optional[ProviderError] = None
+    for _ in range(POLLINATIONS_ATTEMPTS):
+        try:
+            path = _download(_pollinations_url(query, width, height),
+                             workdir / ("scene_%02d.jpg" % index), transport)
+            return path, "generated (pollinations)"
+        except ProviderError as exc:
+            last = exc
+    raise ProviderError(
+        "No asset found for scene %d (%r): Pollinations failed %d times (%s). "
+        "The free image service may be rate-limited or temporarily down."
+        % (index, query, POLLINATIONS_ATTEMPTS, str(last)[:160])) from None
 
 
 def _first_frame(video: Path, dest: Path) -> bool:
@@ -314,7 +336,14 @@ def plan_and_fetch(client: OpenRouterClient, prompt: str, workdir: Path, *,
     """Full builder: plan scenes, fetch one asset each, optionally verify with vision."""
     scenes = plan_scenes(client, prompt, duration=duration, language=language, model=model)
     for scene in scenes:
-        path, source = find_asset(scene.query, orientation, workdir, scene.index, transport)
+        try:
+            path, source = find_asset(scene.query, orientation, workdir, scene.index, transport)
+        except (ProviderError, ConnectionError) as exc:
+            scene.asset_path, scene.source = None, "none"
+            scene.reason = "no asset: %s" % str(exc)[:120]
+            if progress:
+                progress(scene)
+            continue
         scene.asset_path, scene.source = str(path), source
         if progress:
             progress(scene)
