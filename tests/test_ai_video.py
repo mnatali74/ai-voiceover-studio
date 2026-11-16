@@ -1,7 +1,10 @@
 """Offline tests for the AI video builder (OpenRouter + keyless assets, all mocked)."""
 import base64
+import json
 
 import pytest
+
+from voiceover_studio.providers.miragea import HttpResponse
 
 from voiceover_studio.ai_video import OpenRouterClient, Scene, build_script, find_asset, \
     generate_asset, plan_scenes, verify_asset
@@ -95,6 +98,26 @@ def test_verify_asset_skips_video_without_ffmpeg(fake, tmp_path, monkeypatch):
     scene = Scene(0, "text", "query", asset_path=str(video))
     match, reason = verify_asset(OpenRouterClient(api_key="k", transport=fake), scene, "m")
     assert match is True and "ffmpeg" in reason
+
+
+def test_verify_failure_does_not_break_the_plan(fake, tmp_path, monkeypatch):
+    from voiceover_studio.ai_video import plan_and_fetch
+    image = tmp_path / "scene.jpg"
+    image.write_bytes(b"\xff\xd8fakejpeg")
+    fake.add("GET", "https://commons.wikimedia.org/w/api.php", (200, {}))
+    fake.add("GET", "https://api.openverse.org/v1/images/", (200, {"results": []}))
+    fake.add("GET", "https://image.pollinations.ai/prompt/", (200, b"img"))
+    def flaky(method, url, headers, body, timeout):
+        if b"image_url" in (body or b""):
+            return HttpResponse(404, {}, b'{"error": "model gone"}')
+        payload = json.dumps({"choices": [{"message": {"content": PLAN_JSON}}]}).encode()
+        return HttpResponse(200, {}, payload)
+
+    client = OpenRouterClient(api_key="k", transport=flaky)
+    scenes = plan_and_fetch(client, "pyramids", tmp_path, verify=True,
+                            vision_model="google/gemini-2.0-flash-001", transport=fake)
+    assert len(scenes) == 2
+    assert scenes[0].verified is None and "skipped" in scenes[0].reason
 
 
 def test_build_script_includes_assets_and_narration():

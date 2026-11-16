@@ -30,12 +30,12 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 USER_AGENT = "ai-voiceover-studio (+https://github.com/yanghhu/ai-voiceover-studio)"
 
 DEFAULT_MODELS = [
-    "openrouter/auto",
-    "google/gemini-2.0-flash-001",
-    "openai/gpt-4o-mini",
-    "anthropic/claude-3.5-haiku",
-    "deepseek/deepseek-chat",
-    "meta-llama/llama-3.3-70b-instruct",
+    "google/gemini-4-hydrogen",
+    "inclusionai/ling-3.2-flash:free",
+    "google/gemini-4-carbon",
+    "anthropic/claude-fable-5.2",
+    "qwen/qwen4-max",
+    "meta/muse-ember",
 ]
 
 PLAN_SYSTEM = (
@@ -319,5 +319,8 @@ def plan_and_fetch(client: OpenRouterClient, prompt: str, workdir: Path, *,
         if progress:
             progress(scene)
         if verify and client.api_key:
-            scene.verified, scene.reason = verify_asset(client, scene, vision_model)
+            try:
+                scene.verified, scene.reason = verify_asset(client, scene, vision_model)
+            except (ProviderError, ConnectionError) as exc:
+                scene.verified, scene.reason = None, "skipped: %s" % str(exc)[:120]
     return scenes
