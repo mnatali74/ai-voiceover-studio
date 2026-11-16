@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **AI Video tab**: a one-line prompt becomes a finished video. An OpenRouter model plans the
+  scenes (narration + search keywords), keyless sources (Wikimedia Commons, Openverse) provide the
+  visuals, Pollinations generates images when nothing matches, and an optional vision check on the
+  same OpenRouter key rejects assets that do not match the scene. The editable scene plan turns
+  into a Markdown script rendered by the existing video engine.
 - **Web studio**: `voiceover studio` serves a local Gradio web app (optional extra
   `pip install "ai-voiceover-studio[webui]"`) to write or load a script, pick engine, language and
   speed, generate and listen to the voiceover with its SRT and segment table, voice single lines,

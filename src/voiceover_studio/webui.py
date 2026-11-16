@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .ai_video import DEFAULT_MODELS
 from .errors import VoiceoverError
 from .providers import available_providers
 
@@ -209,6 +210,72 @@ def render_video_clip(script: str, provider: str, language: str, speed: float,
     return status, str(out)
 
 
+def ai_plan(prompt: str, duration: float, language: str, orientation: str, model: str,
+            verify: bool, vision_model: str, session: Dict[str, Any]
+            ) -> Tuple[str, List[Tuple[str, str]], List[List[Any]]]:
+    """Prompt -> scene plan + keyless assets (OpenRouter for planning and vision)."""
+    from .ai_video import OpenRouterClient, plan_and_fetch
+    if not (prompt or "").strip():
+        raise ValueError("Write a prompt describing the video you want.")
+    client = OpenRouterClient()
+    workdir = Path(session["dir"]) / "ai_assets"
+    scenes = plan_and_fetch(client, prompt, workdir, duration=duration, language=language,
+                            model=model or "openrouter/auto", orientation=orientation,
+                            verify=bool(verify), vision_model=vision_model or model)
+    session["scenes"] = [s.__dict__ for s in scenes]
+    gallery = [(s.asset_path, "Scene %d: %s (%s)" % (s.index + 1, s.query, s.source))
+               for s in scenes if s.asset_path]
+    rows = [[s.index + 1, s.narration, s.query, s.source,
+             "ok" if s.verified else ("failed" if s.verified is False else "-")]
+            for s in scenes]
+    checked = sum(1 for s in scenes if s.verified)
+    status = ("Planned **%d** scenes. Assets: %s%s" % (
+        len(scenes), ", ".join(sorted({s.source for s in scenes})),
+        (". Vision check passed for %d/%d." % (checked, len(scenes))) if verify else "."))
+    return status, gallery, rows
+
+
+def ai_regenerate(scene_number: int, orientation: str, session: Dict[str, Any]
+                  ) -> Tuple[str, List[Tuple[str, str]]]:
+    """Replace one scene's asset with a freshly generated image (keyless)."""
+    from .ai_video import generate_asset
+    scenes = [Scene(**d) for d in session.get("scenes", [])]
+    if not scenes:
+        raise ValueError("Plan the scenes first.")
+    scene = next((s for s in scenes if s.index == int(scene_number) - 1), None)
+    if scene is None:
+        raise ValueError("Pick a scene number from the list.")
+    path, source = generate_asset(scene.query, orientation,
+                                  Path(session["dir"]) / "ai_assets", scene.index)
+    scene.asset_path, scene.source, scene.verified, scene.reason = str(path), source, None, ""
+    session["scenes"] = [s.__dict__ for s in scenes]
+    gallery = [(s.asset_path, "Scene %d: %s (%s)" % (s.index + 1, s.query, s.source))
+               for s in scenes if s.asset_path]
+    return "Scene %d regenerated (%s)." % (scene.index + 1, source), gallery
+
+
+def ai_build_script(session: Dict[str, Any]) -> str:
+    """Scenes -> editable Markdown script for the renderer."""
+    from .ai_video import Scene, build_script
+    scenes = [Scene(**d) for d in session.get("scenes", [])]
+    if not scenes:
+        raise ValueError("Plan the scenes first.")
+    return build_script(scenes, scenes[0].narration[:60])
+
+
+def ai_render(script_text: str, provider: str, language: str, speed: float, vertical: bool,
+              style: str, music: str, session: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    from .ai_video import Scene, build_script
+    text = (script_text or "").strip()
+    if not text:
+        scenes = [Scene(**d) for d in session.get("scenes", [])]
+        text = build_script(scenes) if scenes else ""
+    if not text:
+        raise ValueError("Plan the scenes first, or write a script.")
+    return render_video_clip(text, provider, language, speed, vertical, style, music, None, session)
+
+
+
 def build_ui(workdir: Optional[Path] = None) -> Any:
     """Assemble the Gradio app (call ``.launch()`` on the result to serve it)."""
     examples = example_scripts()
@@ -300,6 +367,66 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                inputs=[script, provider, language, speed, video_vertical,
                                        video_style, video_music, broll, session],
                                outputs=[video_status, video_out])
+
+        with gr.Tab("AI Video"):
+            gr.Markdown("Describe the video you want: an AI plans the scenes, finds keyless "
+                        "stock visuals (Wikimedia, Openverse) or generates them, optionally "
+                        "verifies each asset with a vision model, then renders the MP4. "
+                        "Needs `OPENROUTER_API_KEY`.")
+            ai_prompt = gr.Textbox(label="Prompt", lines=3,
+                                   placeholder="Es.: una breve storia sulle piramidi egizie")
+            with gr.Row():
+                ai_duration = gr.Slider(10, 120, value=30, step=5, label="Target duration (s)")
+                ai_language = gr.Dropdown(choices=LANGUAGES, value="auto", label="Language")
+                ai_orientation = gr.Dropdown(choices=["landscape", "portrait"], value="landscape",
+                                             label="Orientation")
+            with gr.Row():
+                ai_model = gr.Dropdown(choices=DEFAULT_MODELS, value=DEFAULT_MODELS[0],
+                                       allow_custom_value=True,
+                                       label="Planner model (OpenRouter)")
+                ai_vision_model = gr.Dropdown(choices=DEFAULT_MODELS,
+                                              value=DEFAULT_MODELS[1], allow_custom_value=True,
+                                              label="Vision model (asset verification)")
+                ai_verify = gr.Checkbox(value=True, label="Verify assets with vision")
+            ai_plan_button = gr.Button("Plan scenes and find assets", variant="primary")
+            ai_status = gr.Markdown()
+            with gr.Row():
+                ai_gallery = gr.Gallery(label="Scene assets", columns=4, height=260)
+                ai_scenes = gr.Dataframe(headers=["#", "Narration", "Query", "Source", "Vision"],
+                                         label="Scene plan")
+            with gr.Row():
+                ai_scene_pick = gr.Dropdown(label="Scene to regenerate", choices=[],
+                                            allow_custom_value=True)
+                ai_regen_button = gr.Button("Regenerate asset (new generated image)")
+            ai_build_button = gr.Button("Build the script from these scenes")
+            ai_script = gr.Textbox(label="Generated script (editable)", lines=10)
+            with gr.Row():
+                ai_vertical = gr.Checkbox(value=False, label="Vertical 9:16")
+                ai_style = gr.Dropdown(choices=["auto", "tiktok", "bold", "clean", "minimal", "box"],
+                                       value="auto", label="Caption style")
+                ai_music = gr.Dropdown(choices=["", "ambient", "pulse"], value="ambient",
+                                       label="Background music")
+            ai_render_button = gr.Button("Render video from this script", variant="primary")
+            ai_video_status = gr.Markdown()
+            ai_video_out = gr.Video(label="Video")
+
+            def _scene_choices(session_data):
+                return gr.update(choices=[str(d["index"] + 1) for d in session_data.get("scenes", [])])
+
+            ai_plan_button.click(ai_plan,
+                                 inputs=[ai_prompt, ai_duration, ai_language, ai_orientation,
+                                         ai_model, ai_verify, ai_vision_model, session],
+                                 outputs=[ai_status, ai_gallery, ai_scenes])
+            ai_plan_button.click(_scene_choices, inputs=session, outputs=ai_scene_pick)
+            ai_regen_button.click(ai_regenerate,
+                                  inputs=[ai_scene_pick, ai_orientation, session],
+                                  outputs=[ai_status, ai_gallery])
+            ai_build_button.click(ai_build_script, inputs=session, outputs=ai_script)
+            ai_render_button.click(ai_render,
+                                   inputs=[ai_script, provider, ai_language, speed, ai_vertical,
+                                           ai_style, ai_music, session],
+                                   outputs=[ai_video_status, ai_video_out])
+
     return app
 
 

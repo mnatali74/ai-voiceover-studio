@@ -84,6 +84,7 @@ Each guide has a copy-paste command that runs on the bundled examples.
 - [Subtitles (SRT)](#subtitles-srt-for-youtube)
 - [Faceless video](#faceless-youtube-video-and-shorts-from-a-script)
 - [Web studio](#web-studio)
+- [AI Video](#ai-video-from-a-prompt-to-a-finished-video)
 - [Use it from Python](#use-it-from-python)
 - [Use it from an AI coding agent](#use-it-from-an-ai-coding-agent)
 - [Architecture](#architecture)
@@ -102,6 +103,18 @@ with its SRT subtitles and segment table. A *Quick line* tab voices single sente
 browses the voices of the selected engine (click a row and hit *Test voice* for an instant preview),
 and a *Video* tab renders the finished MP4 when ffmpeg is installed, with optional B-roll images or
 clips uploaded directly in the browser. It binds to localhost by default (`--host`, `--port` to change).
+
+## AI Video: from a prompt to a finished video
+
+The *AI Video* tab builds a video from a one-line prompt, HeyGen-style. Set `OPENROUTER_API_KEY`
+(https://openrouter.ai/keys, any model works — pick cheap ones for planning) and the studio will:
+plan the scenes with the OpenRouter model you choose (narration + search keywords per scene, in
+your language), fetch keyless stock visuals for every scene (Wikimedia Commons video and images,
+Openverse images), generate a fresh image with Pollinations when nothing matches, optionally check
+each asset with a vision model on the same OpenRouter key, and show everything in an editable
+scene plan before rendering the MP4 with the usual captions, B-roll motion and music. No paid
+stock subscriptions: every visual source works without an API key, and OpenRouter is only used
+for the scene plan and the vision check.
 
 ## Why this exists
 
