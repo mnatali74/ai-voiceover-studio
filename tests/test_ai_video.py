@@ -181,3 +181,21 @@ def test_build_script_includes_assets_and_narration():
     assert text.startswith("# Pyramids")
     assert "![](assets/scene_00.jpg)" in text
     assert "First line." in text and "Second line." in text
+
+
+def test_best_value_models_ranks_by_price(fake):
+    from voiceover_studio.ai_video import best_value_models
+    fake.add("GET", "https://openrouter.ai/api/v1/models", (200, {"data": [
+        {"id": "expensive/model", "context_length": 128000,
+         "pricing": {"prompt": "0.00001", "completion": "0.00003"}},
+        {"id": "free/fast-model", "context_length": 32000,
+         "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": "cheap/long-model", "context_length": 200000,
+         "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+        {"id": "text/embed-model", "context_length": 8192,
+         "pricing": {"prompt": "0", "completion": "0"}},
+    ]}))
+    ranked = best_value_models(OpenRouterClient(api_key="k", transport=fake))
+    assert ranked[0] == "free/fast-model"
+    assert "text/embed-model" not in ranked
+    assert ranked.index("cheap/long-model") < ranked.index("expensive/model")

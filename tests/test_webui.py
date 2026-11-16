@@ -128,3 +128,34 @@ def test_save_broll_empty(tmp_path):
     session = new_session(tmp_path)
     assert save_broll(None, session) is None
     assert save_broll([], session) is None
+
+
+def test_save_broll_includes_library_picks(tmp_path):
+    session = new_session(tmp_path)
+    asset = tmp_path / "clip_01.mp4"
+    asset.write_bytes(b"video")
+    folder = save_broll(None, session, extra=[str(asset)])
+    assert folder is not None and list(folder.glob("*clip_01.mp4"))
+
+
+def test_clip_build_populates_library(tmp_path, monkeypatch):
+    import voiceover_studio.clips as clips
+    from voiceover_studio.webui import clip_build
+
+    def fake_build(urls, workdir, client, model, **kwargs):
+        assert urls == ["https://youtu.be/abc"]
+        return {"clips": [str(workdir / "clip_library" / "clips" / "c_01.mp4")],
+                "frames": [str(workdir / "clip_library" / "frames" / "f_001.jpg")],
+                "segments": [{"source": "Vineyards", "title": "Drone shot", "start": 5.0,
+                              "end": 15.0, "reason": "b-roll"}],
+                "sources": ["Vineyards"]}
+
+    monkeypatch.setattr(clips, "build_library", fake_build)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    status, clip_files, frames, update = clip_build("https://youtu.be/abc", "some/model",
+                                                    3, 10, True, session)
+    assert "clips and **1** frames" in status and "Drone shot" in status
+    assert clip_files[0].endswith("c_01.mp4")
+    assert update["choices"][0].endswith("c_01.mp4")
+    assert session["library"]["clips"]

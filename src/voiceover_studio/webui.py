@@ -174,13 +174,15 @@ def list_voices(provider: str, filter_text: str) -> Tuple[str, List[List[Any]]]:
     return "**%d** voices for the **%s** engine." % (len(rows), studio.provider.name), rows
 
 
-def save_broll(files: Optional[List[Any]], session: Dict[str, Any]) -> Optional[Path]:
-    """Copy uploaded images/clips into the session in upload order; returns the folder."""
-    if not files:
+def save_broll(files: Optional[List[Any]], session: Dict[str, Any],
+               extra: Optional[List[Any]] = None) -> Optional[Path]:
+    """Copy uploaded images/clips (plus picked library assets) into the session."""
+    items = list(files or []) + [p for p in (extra or []) if p]
+    if not items:
         return None
     folder = Path(session["dir"]) / "broll"
     folder.mkdir(parents=True, exist_ok=True)
-    for i, item in enumerate(files, 1):
+    for i, item in enumerate(items, 1):
         src = Path(item if isinstance(item, (str, Path)) else item.name)
         shutil.copy(src, folder / ("%03d_%s" % (i, src.name)))
     return folder
@@ -188,7 +190,9 @@ def save_broll(files: Optional[List[Any]], session: Dict[str, Any]) -> Optional[
 
 def render_video_clip(script: str, provider: str, language: str, speed: float,
                       vertical: bool, style: str, music: str, broll: Optional[List[Any]],
-                      session: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+                      session: Dict[str, Any], library: Optional[List[str]] = None,
+                      transition_style: str = "mix", transition: float = 0.5
+                      ) -> Tuple[str, Optional[str]]:
     """Render the script to an MP4 (needs ffmpeg). Returns (status, video)."""
     text = (script or "").strip()
     if not text:
@@ -201,12 +205,14 @@ def render_video_clip(script: str, provider: str, language: str, speed: float,
     studio = Studio(provider or "auto")
     out = workdir / "video.mp4"
     overrides = _voice_overrides(language, speed)
-    result = render_video(studio, save_broll(broll, session), script_path, out,
+    result = render_video(studio, save_broll(broll, session, extra=library), script_path, out,
                           size=(1080, 1920) if vertical else (1920, 1080),
                           style="auto" if style == "auto" else style,
-                          music=music or None, voice_overrides=overrides)
-    status = ("Video **%.1f s**, %d shots, %s captions, engine **%s**."
-              % (result["duration"], result["shots"], result["style"], studio.provider.name))
+                          music=music or None, voice_overrides=overrides,
+                          transition=float(transition), transition_style=transition_style)
+    status = ("Video **%.1f s**, %d shots, %s captions, %s transitions, engine **%s**."
+              % (result["duration"], result["shots"], result["style"], transition_style,
+                 studio.provider.name))
     return status, str(out)
 
 
@@ -284,6 +290,34 @@ def ai_render(script_text: str, provider: str, language: str, speed: float, vert
     if not text:
         raise ValueError("Plan the scenes first, or write a script.")
     return render_video_clip(text, provider, language, speed, vertical, style, music, None, session)
+
+
+def clip_build(urls: str, model: str, n_clips: int, clip_seconds: float, stills: bool,
+               session: Dict[str, Any]) -> Tuple[str, List[str], List[Tuple[str, str]], Any]:
+    """YouTube URLs -> highlight clips + still frames stored in the session library."""
+    from .ai_video import OpenRouterClient, best_value_models
+    from .clips import build_library
+    links = [u for u in (urls or "").split() if u.startswith("http")]
+    if not links:
+        raise ValueError("Paste at least one YouTube link (https://...).")
+    client = OpenRouterClient()
+    if model in ("", "best value (auto)"):
+        model = best_value_models(client)[0]
+    workdir = Path(session["dir"])
+    status_lines = ["Working with model **%s**..." % model]
+    library = build_library(links, workdir, client, model, n_clips=int(n_clips),
+                            clip_seconds=float(clip_seconds), stills=bool(stills),
+                            progress=lambda msg: status_lines.append("- %s" % msg))
+    session["library"] = library
+    picks = library["clips"] + library["frames"]
+    status = ("**%d** clips and **%d** frames from %d video(s), model **%s**.\n\n%s"
+              % (len(library["clips"]), len(library["frames"]), len(library["sources"]),
+                 model, "\n".join(status_lines)))
+    for seg in library["segments"]:
+        status += "\n- %s — %s (%.0fs→%.0fs)" % (seg["title"], seg["source"],
+                                                  seg["start"], seg["end"])
+    frames_gallery = [(f, Path(f).parent.name) for f in library["frames"][:60]]
+    return status, library["clips"], frames_gallery, gr.update(choices=picks, value=[])
 
 
 
@@ -371,12 +405,20 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
             broll = gr.File(label="B-roll images or video clips (optional, used in upload order "
                                   "for paragraphs without ![](...)",
                             file_count="multiple", file_types=["image", "video"])
+            with gr.Row():
+                video_transition = gr.Dropdown(choices=["mix", "fade", "slide", "zoom", "cut"],
+                                               value="mix", label="Transition style")
+                video_transition_time = gr.Slider(0, 1.5, value=0.5, step=0.1,
+                                                  label="Transition duration (s)")
+            library_pick = gr.CheckboxGroup(choices=[], label="Reuse clips or frames from the "
+                                                             "Clip studio library", value=[])
             video_button = gr.Button("Render video", variant="primary")
             video_status = gr.Markdown()
             video_out = gr.Video(label="Video")
             video_button.click(render_video_clip,
                                inputs=[script, provider, language, speed, video_vertical,
-                                       video_style, video_music, broll, session],
+                                       video_style, video_music, broll, session, library_pick,
+                                       video_transition, video_transition_time],
                                outputs=[video_status, video_out])
 
         with gr.Tab("AI Video"):
@@ -437,6 +479,34 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                    inputs=[ai_script, provider, ai_language, speed, ai_vertical,
                                            ai_style, ai_music, session],
                                    outputs=[ai_video_status, ai_video_out])
+
+        with gr.Tab("Clip studio"):
+            gr.Markdown("Paste YouTube links: the studio downloads each video, reads its "
+                        "subtitles, and an OpenRouter model picks the most reusable highlight "
+                        "segments. Every clip is cut with ffmpeg and meaningful still frames are "
+                        "extracted; pick them in the **Video** tab to use them as B-roll. "
+                        "Needs `OPENROUTER_API_KEY`, [yt-dlp](https://github.com/yt-dlp/yt-dlp) "
+                        "(`pip install \"ai-voiceover-studio[clip]\"`) and ffmpeg.")
+            clip_urls = gr.Textbox(label="YouTube links (one or more, one per line)", lines=3,
+                                   placeholder="https://www.youtube.com/watch?v=...\n"
+                                               "https://youtu.be/...")
+            with gr.Row():
+                clip_model = gr.Dropdown(choices=["best value (auto)"] + DEFAULT_MODELS,
+                                         value="best value (auto)", allow_custom_value=True,
+                                         label="Model (OpenRouter) — 'best value' picks the "
+                                               "cheapest capable model")
+                clip_n = gr.Slider(1, 6, value=3, step=1, label="Clips per video")
+                clip_len = gr.Slider(5, 30, value=10, step=1, label="Clip length (s)")
+            clip_stills = gr.Checkbox(value=True, label="Also extract still frames from the clips")
+            clip_button = gr.Button("Download, pick highlights and cut clips", variant="primary")
+            clip_status = gr.Markdown()
+            with gr.Row():
+                clip_files = gr.Files(label="Cut clips (reuse them as B-roll)")
+                clip_frames = gr.Gallery(label="Extracted frames", columns=6, height=260)
+            clip_button.click(clip_build,
+                              inputs=[clip_urls, clip_model, clip_n, clip_len, clip_stills,
+                                      session],
+                              outputs=[clip_status, clip_files, clip_frames, library_pick])
 
     return app
 

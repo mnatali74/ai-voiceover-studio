@@ -85,6 +85,7 @@ Each guide has a copy-paste command that runs on the bundled examples.
 - [Faceless video](#faceless-youtube-video-and-shorts-from-a-script)
 - [Web studio](#web-studio)
 - [AI Video](#ai-video-from-a-prompt-to-a-finished-video)
+- [Clip studio](#clip-studio-reuse-youtube-footage)
 - [Use it from Python](#use-it-from-python)
 - [Use it from an AI coding agent](#use-it-from-an-ai-coding-agent)
 - [Architecture](#architecture)
@@ -115,6 +116,17 @@ each asset with a vision model on the same OpenRouter key, and show everything i
 scene plan before rendering the MP4 with the usual captions, B-roll motion and music. No paid
 stock subscriptions: every visual source works without an API key, and OpenRouter is only used
 for the scene plan and the vision check.
+
+## Clip studio: reuse YouTube footage
+
+The *Clip studio* tab turns YouTube links into a personal B-roll library. Paste one or more URLs,
+and for each video the studio downloads the source (yt-dlp, up to 1080p), reads its manual or
+automatic subtitles, and asks the OpenRouter model you chose to pick the most reusable,
+self-contained highlight segments. The model can be picked manually or left on *best value (auto)*,
+which ranks the OpenRouter catalogue by price per token. Every highlight is cut into a standalone
+mp4 with ffmpeg and meaningful still frames are extracted from the clips. Everything lands in the
+session library and shows up in the *Video* tab, where you tick exactly which clips and frames to
+reuse as B-roll. Extra: `pip install "ai-voiceover-studio[clip]"`; needs ffmpeg.
 
 ## Why this exists
 

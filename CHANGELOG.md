@@ -16,6 +16,13 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **Clip studio tab**: paste YouTube links and get a reusable B-roll library. yt-dlp downloads
+  each video, its subtitles feed the OpenRouter model you choose (or *best value (auto)*, which
+  ranks the catalogue by price per token) to pick self-contained highlight segments, ffmpeg cuts
+  the clips and extracts still frames, and the *Video* tab lets you tick exactly which clips and
+  frames to reuse. New optional extra `clip` (`yt-dlp`).
+- **Transition controls in the Video tab**: transition style (mix, fade, slide, zoom, cut) and
+  duration are now selectable in the UI, on top of the existing CLI flags.
 - **AI Video tab**: a one-line prompt becomes a finished video. An OpenRouter model plans the
   scenes (narration + search keywords), keyless sources (Wikimedia Commons, Openverse) provide the
   visuals, Pollinations generates images when nothing matches, and an optional vision check on the

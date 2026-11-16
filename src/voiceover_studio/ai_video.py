@@ -104,6 +104,27 @@ class OpenRouterClient:
         return sorted(item["id"] for item in data.get("data", []) if item.get("id"))
 
 
+def best_value_models(client: OpenRouterClient, limit: int = 8) -> List[str]:
+    """Model ids ranked by lowest price per token, preferring long-context chat models."""
+    try:
+        data = client.request("GET", "/models")
+    except (ProviderError, ConnectionError):
+        return list(DEFAULT_MODELS)
+    ranked = []
+    for item in data.get("data", []):
+        model_id = item.get("id")
+        if not model_id or any(tag in model_id for tag in ("embed", "whisper", "moderation")):
+            continue
+        pricing = item.get("pricing") or {}
+        try:
+            cost = float(pricing.get("prompt") or 0) + float(pricing.get("completion") or 0)
+        except (TypeError, ValueError):
+            continue
+        ranked.append((round(cost, 8), -int(item.get("context_length") or 0), model_id))
+    ranked.sort()
+    return [item[2] for item in ranked[:limit]] or list(DEFAULT_MODELS)
+
+
 def _parse_json(text: str) -> Any:
     cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
     try:
