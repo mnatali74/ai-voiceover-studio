@@ -163,9 +163,13 @@ def best_value_models(client: OpenRouterClient, limit: int = 8) -> List[str]:
     ranked = []
     for item in data.get("data", []):
         model_id = item.get("id")
-        if not model_id or any(tag in model_id for tag in ("embed", "whisper", "moderation")):
+        if not model_id or model_id == "openrouter/auto":  # router pseudo-model, not a real choice
+            continue
+        if any(tag in model_id for tag in ("embed", "whisper", "moderation")):
             continue
         pricing = item.get("pricing") or {}
+        if pricing.get("prompt") in (None, "") and pricing.get("completion") in (None, ""):
+            continue  # no published pricing: cannot be ranked by value
         try:
             cost = float(pricing.get("prompt") or 0) + float(pricing.get("completion") or 0)
         except (TypeError, ValueError):

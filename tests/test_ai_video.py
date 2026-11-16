@@ -271,3 +271,19 @@ def test_error_messages_include_actionable_hint(fake):
     with pytest.raises(ProviderError) as excinfo:
         image_client(fake).chat("gone/model", [{"role": "user", "content": "hi"}])
     assert "no longer served" in str(excinfo.value)
+
+
+def test_best_value_models_skips_pseudo_models_and_unpriced(fake):
+    from voiceover_studio.ai_video import best_value_models
+    fake.add("GET", "https://openrouter.ai/api/v1/models", (200, {"data": [
+        {"id": "openrouter/auto", "context_length": 1000000,
+         "pricing": {}},
+        {"id": "mystery/model", "context_length": 64000,
+         "pricing": {}},
+        {"id": "free/fast-model", "context_length": 32000,
+         "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": "cheap/model", "context_length": 200000,
+         "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+    ]}))
+    ranked = best_value_models(OpenRouterClient(api_key="k", transport=fake))
+    assert ranked == ["free/fast-model", "cheap/model"]
