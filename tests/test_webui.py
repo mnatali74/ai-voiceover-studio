@@ -154,7 +154,7 @@ def test_clip_build_populates_library(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     session = new_session(tmp_path)
     status, clip_files, frames, update = clip_build("https://youtu.be/abc", "some/model",
-                                                    3, 10, True, session)
+                                                    3, 10, True, "", session)
     assert "clips and **1** frames" in status and "Drone shot" in status
     assert clip_files[0].endswith("c_01.mp4")
     assert update["choices"][0].endswith("c_01.mp4")

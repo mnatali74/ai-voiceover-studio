@@ -14,6 +14,7 @@ from the *Video* tab. yt-dlp is an optional extra (``pip install
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -44,6 +45,29 @@ def _import_yt_dlp():
     return yt_dlp
 
 
+def _cookie_opts(cookies: Optional[str] = None) -> Dict[str, Any]:
+    """yt-dlp cookie options from an explicit file, else from the environment."""
+    cookie_file = (cookies or "").strip() or os.environ.get("VOICEOVER_YTDLP_COOKIES", "")
+    if cookie_file:
+        return {"cookiefile": cookie_file}
+    browser = (os.environ.get("VOICEOVER_YTDLP_COOKIES_FROM_BROWSER", "") or "").strip()
+    if browser:
+        return {"cookiesfrombrowser": (browser.split(":")[0],)}
+    return {}
+
+
+def _download_hint(url: str, exc: Exception) -> str:
+    """One-line failure report; bot-check errors point to the cookie options."""
+    message = str(exc)
+    if "Sign in to confirm" in message or "bot" in message.lower():
+        return ("%s: YouTube asked for sign-in (bot check). Export your browser cookies to a "
+                "cookies.txt file (see https://github.com/yt-dlp/yt-dlp/wiki/Extractors#"
+                "exporting-youtube-cookies) and set VOICEOVER_YTDLP_COOKIES=/path/cookies.txt, "
+                "or VOICEOVER_YTDLP_COOKIES_FROM_BROWSER=chrome. Detail: %s"
+                % (url, message[:160]))
+    return "%s: %s" % (url, message[:200])
+
+
 def _slug(text: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "-", (text or "clip").lower()).strip("-")
     return (slug or "clip")[:40]
@@ -54,7 +78,8 @@ def _mmss(seconds: float) -> str:
     return "%02d:%02d" % (seconds // 60, seconds % 60)
 
 
-def download_video(url: str, dest_dir: Path) -> Tuple[Path, Dict[str, Any]]:
+def download_video(url: str, dest_dir: Path,
+                   cookies: Optional[str] = None) -> Tuple[Path, Dict[str, Any]]:
     """Download one YouTube URL (<=1080p mp4). Returns (path, info dict)."""
     yt_dlp = _import_yt_dlp()
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -62,7 +87,7 @@ def download_video(url: str, dest_dir: Path) -> Tuple[Path, Dict[str, Any]]:
                        "b[height<=1080][ext=mp4]/bv*+ba/b"),
             "outtmpl": str(dest_dir / "%(id)s.%(ext)s"),
             "merge_output_format": "mp4", "noplaylist": True,
-            "quiet": True, "no_warnings": True}
+            "quiet": True, "no_warnings": True, **_cookie_opts(cookies)}
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True) or {}
         filepath = ((info.get("requested_downloads") or [{}])[0].get("filepath")
@@ -106,14 +131,15 @@ def parse_vtt(text: str) -> str:
     return "\n".join("[%s] %s" % (_mmss(start), body) for start, body in merged)
 
 
-def fetch_transcript(url: str, dest_dir: Path) -> str:
+def fetch_transcript(url: str, dest_dir: Path, cookies: Optional[str] = None) -> str:
     """Download manual or automatic subtitles and return them as timestamped text."""
     yt_dlp = _import_yt_dlp()
     dest_dir.mkdir(parents=True, exist_ok=True)
     before = set(dest_dir.glob("*.vtt"))
     opts = {"skip_download": True, "writesubtitles": True, "writeautomaticsub": True,
             "subtitleslangs": list(SUBTITLE_LANGS), "subtitlesformat": "vtt",
-            "outtmpl": str(dest_dir / "%(id)s.%(ext)s"), "quiet": True, "no_warnings": True}
+            "outtmpl": str(dest_dir / "%(id)s.%(ext)s"), "quiet": True, "no_warnings": True,
+            **_cookie_opts(cookies)}
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.extract_info(url, download=True)
@@ -219,27 +245,34 @@ def extract_frames(src: Path, dest_dir: Path, every: float = 3.0,
 
 def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
                   n_clips: int = 3, clip_seconds: float = 10.0, stills: bool = True,
-                  frame_every: float = 3.0,
+                  frame_every: float = 3.0, cookies: Optional[str] = None,
                   progress: Optional[Callable[[str], None]] = None) -> Dict[str, List[Any]]:
     """Process every URL: download, pick highlights, cut clips, extract stills.
 
-    Returns ``{"clips": [paths], "frames": [paths], "segments": [segment dicts],
-    "sources": [titles]}`` — everything stored under ``workdir/clip_library``.
+    A URL that fails (removed video, bot check, network) is reported in
+    ``library["errors"]`` and the remaining URLs are still processed. Returns
+    ``{"clips": [paths], "frames": [paths], "segments": [segment dicts],
+    "sources": [titles], "errors": [messages]}`` under ``workdir/clip_library``.
     """
     workdir = Path(workdir) / "clip_library"
-    library: Dict[str, List[Any]] = {"clips": [], "frames": [], "segments": [], "sources": []}
+    library: Dict[str, List[Any]] = {"clips": [], "frames": [], "segments": [],
+                                     "sources": [], "errors": []}
     for url in urls:
         url = (url or "").strip()
         if not url or not url.startswith("http"):
             continue
         if progress:
             progress("Downloading %s" % url)
-        path, info = download_video(url, workdir / "sources")
+        try:
+            path, info = download_video(url, workdir / "sources", cookies=cookies)
+        except Exception as exc:
+            library["errors"].append(_download_hint(url, exc))
+            continue
         title = str(info.get("title") or path.stem)
         duration = float(info.get("duration") or probe_duration(path) or 0.0)
         if progress:
             progress("Fetching subtitles for %s" % title)
-        transcript = fetch_transcript(url, workdir / "sources")
+        transcript = fetch_transcript(url, workdir / "sources", cookies=cookies)
         if progress:
             progress("Picking highlights from %s" % title)
         segments = suggest_segments(client, model, transcript, duration,

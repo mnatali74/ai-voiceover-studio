@@ -20,7 +20,10 @@ All notable changes to this project are documented here. The format follows
   each video, its subtitles feed the OpenRouter model you choose (or *best value (auto)*, which
   ranks the catalogue by price per token) to pick self-contained highlight segments, ffmpeg cuts
   the clips and extracts still frames, and the *Video* tab lets you tick exactly which clips and
-  frames to reuse. New optional extra `clip` (`yt-dlp`).
+  frames to reuse. New optional extra `clip` (`yt-dlp`). One failing URL no longer aborts the
+  batch; YouTube bot checks are reported with cookie instructions (`VOICEOVER_YTDLP_COOKIES` for a
+  cookies.txt file, `VOICEOVER_YTDLP_COOKIES_FROM_BROWSER` for the browser profile, or the
+  cookies field in the tab).
 - **Transition controls in the Video tab**: transition style (mix, fade, slide, zoom, cut) and
   duration are now selectable in the UI, on top of the existing CLI flags.
 - **AI Video tab**: a one-line prompt becomes a finished video. An OpenRouter model plans the

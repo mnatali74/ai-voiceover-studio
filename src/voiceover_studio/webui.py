@@ -293,7 +293,8 @@ def ai_render(script_text: str, provider: str, language: str, speed: float, vert
 
 
 def clip_build(urls: str, model: str, n_clips: int, clip_seconds: float, stills: bool,
-               session: Dict[str, Any]) -> Tuple[str, List[str], List[Tuple[str, str]], Any]:
+               cookies: str, session: Dict[str, Any]
+               ) -> Tuple[str, List[str], List[Tuple[str, str]], Any]:
     """YouTube URLs -> highlight clips + still frames stored in the session library."""
     from .ai_video import OpenRouterClient, best_value_models
     from .clips import build_library
@@ -307,12 +308,15 @@ def clip_build(urls: str, model: str, n_clips: int, clip_seconds: float, stills:
     status_lines = ["Working with model **%s**..." % model]
     library = build_library(links, workdir, client, model, n_clips=int(n_clips),
                             clip_seconds=float(clip_seconds), stills=bool(stills),
+                            cookies=cookies,
                             progress=lambda msg: status_lines.append("- %s" % msg))
     session["library"] = library
     picks = library["clips"] + library["frames"]
     status = ("**%d** clips and **%d** frames from %d video(s), model **%s**.\n\n%s"
               % (len(library["clips"]), len(library["frames"]), len(library["sources"]),
                  model, "\n".join(status_lines)))
+    for error in library.get("errors", []):
+        status += "\n\n⚠️ %s" % error
     for seg in library["segments"]:
         status += "\n- %s — %s (%.0fs→%.0fs)" % (seg["title"], seg["source"],
                                                   seg["start"], seg["end"])
@@ -498,6 +502,10 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                 clip_n = gr.Slider(1, 6, value=3, step=1, label="Clips per video")
                 clip_len = gr.Slider(5, 30, value=10, step=1, label="Clip length (s)")
             clip_stills = gr.Checkbox(value=True, label="Also extract still frames from the clips")
+            clip_cookies = gr.Textbox(label="Cookies file (optional) — path to a cookies.txt "
+                                            "export, needed when YouTube asks to sign in",
+                                      value="", lines=1,
+                                      placeholder="/percorso/cookies.txt")
             clip_button = gr.Button("Download, pick highlights and cut clips", variant="primary")
             clip_status = gr.Markdown()
             with gr.Row():
@@ -505,7 +513,7 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                 clip_frames = gr.Gallery(label="Extracted frames", columns=6, height=260)
             clip_button.click(clip_build,
                               inputs=[clip_urls, clip_model, clip_n, clip_len, clip_stills,
-                                      session],
+                                      clip_cookies, session],
                               outputs=[clip_status, clip_files, clip_frames, library_pick])
 
     return app

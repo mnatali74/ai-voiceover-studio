@@ -126,7 +126,10 @@ self-contained highlight segments. The model can be picked manually or left on *
 which ranks the OpenRouter catalogue by price per token. Every highlight is cut into a standalone
 mp4 with ffmpeg and meaningful still frames are extracted from the clips. Everything lands in the
 session library and shows up in the *Video* tab, where you tick exactly which clips and frames to
-reuse as B-roll. Extra: `pip install "ai-voiceover-studio[clip]"`; needs ffmpeg.
+reuse as B-roll. A URL that fails is reported and the rest of the batch continues. When YouTube
+answers "Sign in to confirm you're not a bot", export your browser cookies to a cookies.txt file
+and point the studio at it: set the cookies field in the tab, or `VOICEOVER_YTDLP_COOKIES=/path/cookies.txt`, or `VOICEOVER_YTDLP_COOKIES_FROM_BROWSER=chrome`. Extra:
+`pip install "ai-voiceover-studio[clip]"`; needs ffmpeg.
 
 ## Why this exists
 

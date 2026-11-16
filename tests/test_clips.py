@@ -111,9 +111,10 @@ def test_build_library_cuts_suggested_segments(fake, monkeypatch, tmp_path):
     source.parent.mkdir(parents=True)
     source.write_bytes(b"video")
     monkeypatch.setattr(clips, "download_video",
-                        lambda url, dest: (source, {"id": "abc", "title": "Vineyards",
-                                                    "duration": 120.0}))
-    monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest: "[00:10] great shots")
+                        lambda url, dest, cookies=None: (source, {"id": "abc",
+                                                                  "title": "Vineyards",
+                                                                  "duration": 120.0}))
+    monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "[00:10] great shots")
     monkeypatch.setattr(clips, "probe_duration", lambda path: 120.0)
     cut, frames = [], []
     monkeypatch.setattr(clips, "cut_clip",
@@ -134,4 +135,38 @@ def test_build_library_skips_bad_urls(fake, monkeypatch, tmp_path):
     from voiceover_studio import clips
     monkeypatch.setattr(clips, "download_video", lambda *a: (_ for _ in ()).throw(AssertionError()))
     library = build_library(["", "not-a-url"], tmp_path, None, "m")
-    assert library == {"clips": [], "frames": [], "segments": [], "sources": []}
+    assert library["clips"] == [] and library["errors"] == []
+
+
+def test_build_library_continues_after_download_failure(fake, monkeypatch, tmp_path):
+    from voiceover_studio import clips
+    source = tmp_path / "sources" / "ok.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"video")
+
+    def fake_download(url, dest, cookies=None):
+        if "blocked" in url:
+            raise ConfigError("Sign in to confirm you're not a bot")
+        return source, {"id": "ok", "title": "Good video", "duration": 60.0}
+
+    monkeypatch.setattr(clips, "download_video", fake_download)
+    monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "")
+    monkeypatch.setattr(clips, "cut_clip", lambda src, start, end, dest: dest)
+    monkeypatch.setattr(clips, "extract_frames", lambda src, dest, every=3.0: [])
+    library = build_library(["https://youtu.be/blocked", "https://youtu.be/ok"],
+                            tmp_path, None, "m", n_clips=1, clip_seconds=10.0, stills=False)
+    assert len(library["clips"]) == 1 and library["sources"] == ["Good video"]
+    assert "bot check" in library["errors"][0] and "cookies.txt" in library["errors"][0]
+
+
+def test_cookie_opts_from_argument_and_env(monkeypatch):
+    from voiceover_studio.clips import _cookie_opts
+    monkeypatch.delenv("VOICEOVER_YTDLP_COOKIES", raising=False)
+    monkeypatch.delenv("VOICEOVER_YTDLP_COOKIES_FROM_BROWSER", raising=False)
+    assert _cookie_opts() == {}
+    assert _cookie_opts("/tmp/cookies.txt") == {"cookiefile": "/tmp/cookies.txt"}
+    monkeypatch.setenv("VOICEOVER_YTDLP_COOKIES", "/env/cookies.txt")
+    assert _cookie_opts() == {"cookiefile": "/env/cookies.txt"}
+    monkeypatch.delenv("VOICEOVER_YTDLP_COOKIES")
+    monkeypatch.setenv("VOICEOVER_YTDLP_COOKIES_FROM_BROWSER", "chrome:Profile 1")
+    assert _cookie_opts() == {"cookiesfrombrowser": ("chrome",)}
