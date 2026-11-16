@@ -23,6 +23,10 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **Google Colab notebook** (`colab/ai_voiceover_studio.ipynb`): the full web studio (all tabs,
+  including AI Video and Clip studio) runs on Colab — one cell installs the package with the
+  `webui`, `edge` and `clip` extras plus ffmpeg and deno, the API keys come from the Colab
+  secrets, and the UI is served on a public `*.gradio.live` link with a one-click results zip.
 - **Quick preview and presentation-style illustrations in the Clip studio**: before the full
   render, a *Quick preview* button produces a fast, silent, low-resolution draft (dummy voice,
   half resolution, separate `preview.mp4`) so the flow can be checked HeyGen-style in seconds.

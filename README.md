@@ -105,6 +105,11 @@ browses the voices of the selected engine (click a row and hit *Test voice* for 
 and a *Video* tab renders the finished MP4 when ffmpeg is installed, with optional B-roll images or
 clips uploaded directly in the browser. It binds to localhost by default (`--host`, `--port` to change).
 
+No local Python? Run the same studio on [Google Colab](https://colab.research.google.com/github/mnatali74/ai-voiceover-studio/blob/vibe/web-studio-b186e9/colab/ai_voiceover_studio.ipynb):
+notebook [`colab/ai_voiceover_studio.ipynb`](colab/ai_voiceover_studio.ipynb) installs everything
+(package, ffmpeg, deno), reads the API keys from the Colab secrets and serves the full UI on a
+public `*.gradio.live` link.
+
 ## AI Video: from a prompt to a finished video
 
 The *AI Video* tab builds a video from a one-line prompt, HeyGen-style. Set `OPENROUTER_API_KEY`
