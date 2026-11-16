@@ -24,9 +24,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 - **Google Colab notebook** (`colab/ai_voiceover_studio.ipynb`): the full web studio (all tabs,
-  including AI Video and Clip studio) runs on Colab — one cell installs the package with the
-  `webui`, `edge` and `clip` extras plus ffmpeg and deno, the API keys come from the Colab
-  secrets, and the UI is served on a public `*.gradio.live` link with a one-click results zip.
+  including AI Video and Clip studio) runs on Colab without any local setup — the keys
+  (`OPENROUTER_API_KEY`, `PIXABAY_KEY`) come from the Colab secrets, a check cell tests both
+  sources before launching, and the UI is served on a public `*.gradio.live` link with a
+  one-click results zip. The notebook is tuned for a YouTube-free workflow: Pixabay (plus the
+  keyless Wikimedia Commons) for footage and OpenRouter image models for illustrations, so it
+  installs only the `webui` and `edge` extras (no yt-dlp, no deno, no cookies).
 - **Quick preview and presentation-style illustrations in the Clip studio**: before the full
   render, a *Quick preview* button produces a fast, silent, low-resolution draft (dummy voice,
   half resolution, separate `preview.mp4`) so the flow can be checked HeyGen-style in seconds.
