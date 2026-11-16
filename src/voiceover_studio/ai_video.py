@@ -111,8 +111,9 @@ class OpenRouterClient:
         response = self.transport(method, self.base_url + path, self._headers(), payload, self.timeout)
         if response.status >= 400:
             detail = response.body.decode("utf-8", "replace")[:300]
-            raise ProviderError("OpenRouter %s %s failed (%d): %s"
-                                % (method, path, response.status, detail))
+            raise ProviderError("OpenRouter %s %s failed (%d): %s%s"
+                                % (method, path, response.status, detail,
+                                   _status_hint(response.status)))
         return response.json()
 
     def chat(self, model: str, messages: List[Dict[str, Any]], max_tokens: int = 2000) -> str:
@@ -137,6 +138,20 @@ class OpenRouterClient:
     def models(self) -> List[str]:
         data = self.request("GET", "/models")
         return sorted(item["id"] for item in data.get("data", []) if item.get("id"))
+
+
+def _status_hint(status: int) -> str:
+    """A short, actionable hint for the most common OpenRouter HTTP errors."""
+    if status in (401, 403):
+        return " Check OPENROUTER_API_KEY (create or rotate it at https://openrouter.ai/keys)."
+    if status == 402:
+        return (" The OpenRouter account has no credits for this model: pick a free one "
+                "or top up at https://openrouter.ai/credits.")
+    if status == 404:
+        return " This model is no longer served: pick another model from the dropdown."
+    if status == 429:
+        return " Rate limited: wait a minute, or pick another (cheaper/free) model."
+    return ""
 
 
 def best_value_models(client: OpenRouterClient, limit: int = 8) -> List[str]:

@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **Clearer OpenRouter errors and model fallback in the Clip studio**: every OpenRouter HTTP
+  error now carries an actionable hint (invalid key → openrouter.ai/keys, 402 → no credits,
+  404 → model no longer served, 429 → rate limited), and *Suggest search queries* automatically
+  retries on the default model when the chosen one fails instead of aborting.
 - **Clip studio disk safety**: sources are downloaded as small (<=720p) video-only files and,
   once the model has picked the highlights, only those sections are fetched (yt-dlp
   `download_ranges`), so a 30-minute source costs a few megabytes instead of gigabytes. The

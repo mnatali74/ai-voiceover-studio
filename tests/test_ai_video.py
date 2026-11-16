@@ -257,3 +257,17 @@ def test_generate_illustration_rejects_svg(fake, tmp_path):
     fake.add("POST", "https://openrouter.ai/api/v1/chat/completions", image_payload(data_url))
     with pytest.raises(ProviderError):
         generate_illustration(image_client(fake), "timeline", tmp_path / "illu")
+
+
+def test_error_messages_include_actionable_hint(fake):
+    from voiceover_studio.ai_video import _status_hint
+    assert "openrouter.ai/keys" in _status_hint(401)
+    assert "credits" in _status_hint(402)
+    assert "no longer served" in _status_hint(404)
+    assert "Rate limited" in _status_hint(429)
+    assert _status_hint(500) == ""
+    fake.add("POST", "https://openrouter.ai/api/v1/chat/completions",
+             (404, {"error": {"message": "model gone"}}))
+    with pytest.raises(ProviderError) as excinfo:
+        image_client(fake).chat("gone/model", [{"role": "user", "content": "hi"}])
+    assert "no longer served" in str(excinfo.value)

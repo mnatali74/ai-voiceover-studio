@@ -378,3 +378,26 @@ def test_clip_select_reports_reading_time(tmp_path, monkeypatch):
     assert seen == [60.0, 0.0]
     assert "Target was 60 s" not in status2
     assert "reads in about" in status2
+
+
+def test_clip_suggest_falls_back_to_default_model(tmp_path, monkeypatch):
+    import voiceover_studio.ai_video as ai_video
+    from voiceover_studio.errors import ProviderError
+    from voiceover_studio.webui import clip_suggest
+
+    def fake_best_value(client, limit=8):
+        return ["broken/model"]
+
+    def fake_suggest(client, model, prompt, n=5):
+        if model == "broken/model":
+            raise ProviderError("OpenRouter POST /chat/completions failed (404)")
+        assert model == ai_video.DEFAULT_MODELS[0]
+        return ["hills aerial", "wine cellar"]
+
+    monkeypatch.setattr(ai_video, "best_value_models", fake_best_value)
+    monkeypatch.setattr("voiceover_studio.clips.suggest_searches", fake_suggest)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    status, queries = clip_suggest("enoturismo", "best value (auto)", 5, session)
+    assert "fallback from broken/model" in status
+    assert queries == "hills aerial\nwine cellar"

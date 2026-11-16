@@ -318,14 +318,21 @@ def _embed_html(candidates: List[Dict[str, Any]], limit: int = 6) -> str:
 def clip_suggest(prompt: str, model: str, sources: int, session: Dict[str, Any]
                  ) -> Tuple[str, str]:
     """Prompt -> editable search queries, one per line (the model only suggests)."""
-    from .ai_video import OpenRouterClient, best_value_models
+    from .ai_video import DEFAULT_MODELS, OpenRouterClient, best_value_models
     from .clips import suggest_searches
+    from .errors import ProviderError
     if not (prompt or "").strip():
         raise ValueError("Write the prompt of the video you want to build.")
     client = OpenRouterClient()
     if model in ("", "best value (auto)"):
         model = best_value_models(client)[0]
-    queries = suggest_searches(client, model, prompt, n=int(sources))
+    try:
+        queries = suggest_searches(client, model, prompt, n=int(sources))
+    except ProviderError:
+        if model == DEFAULT_MODELS[0]:
+            raise
+        queries = suggest_searches(client, DEFAULT_MODELS[0], prompt, n=int(sources))
+        model = "%s (fallback from %s)" % (DEFAULT_MODELS[0], model)
     return ("**%d** queries suggested by model **%s**. Edit them freely (one per line), "
             "then run the search." % (len(queries), model)), "\n".join(queries)
 
