@@ -106,9 +106,10 @@ and a *Video* tab renders the finished MP4 when ffmpeg is installed, with option
 clips uploaded directly in the browser. It binds to localhost by default (`--host`, `--port` to change).
 
 No local Python? Run the same studio on [Google Colab](https://colab.research.google.com/github/mnatali74/ai-voiceover-studio/blob/vibe/web-studio-b186e9/colab/ai_voiceover_studio.ipynb):
-notebook [`colab/ai_voiceover_studio.ipynb`](colab/ai_voiceover_studio.ipynb) installs everything
-(package, ffmpeg, deno), reads the API keys from the Colab secrets and serves the full UI on a
-public `*.gradio.live` link.
+notebook [`colab/ai_voiceover_studio.ipynb`](colab/ai_voiceover_studio.ipynb) installs the
+package, reads the API keys from the Colab secrets, checks Pixabay and OpenRouter connectivity
+and serves the full UI on a public `*.gradio.live` link. It is tuned for a YouTube-free
+workflow: Pixabay and Wikimedia Commons for footage, OpenRouter image models for illustrations.
 
 ## AI Video: from a prompt to a finished video
 
