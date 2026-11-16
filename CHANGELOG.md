@@ -23,6 +23,13 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **Stock-footage sources with real descriptions in the Clip studio**: the search now runs on
+  selectable sources — YouTube, **Wikimedia Commons** (keyless, richly described videos,
+  downloaded directly over HTTPS: no cookies, no bot checks, no rate limits) and **Pixabay**
+  (professionally tagged cinematic footage, free API key shown at the top of
+  pixabay.com/api/docs/ when logged in, or `VOICEOVER_PIXABAY_KEY`). Candidates preview inline
+  (embedded player for YouTube, direct video tag for the stock sources) and flow into the same
+  select → download → classify → catalog pipeline.
 - **Editable search queries in the Clip studio**: the model's suggested YouTube queries are now
   shown in an editable form (one per line) before searching, so the search no longer returns the
   same generic results; queries written by hand work without any API key.

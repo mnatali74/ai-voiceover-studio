@@ -20,6 +20,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -29,8 +30,9 @@ USER_AGENT = "ai-voiceover-studio (+https://github.com/yanghhu/ai-voiceover-stud
 SUBTITLE_LANGS = ("it", "en", "es", "fr", "de", "pt")
 MAX_TRANSCRIPT_CHARS = 12000
 MAX_SOURCE_SECONDS = 1800
-MIN_SOURCE_SECONDS = 30
+MIN_SOURCE_SECONDS = 5
 MAX_SOURCE_BYTES = 600 * 1024 * 1024
+STOCK_SOURCES = ("YouTube", "Wikimedia Commons", "Pixabay")
 
 
 CLIP_SYSTEM = (
@@ -154,6 +156,94 @@ def search_youtube(query: str, limit: int = 4,
                         "duration": duration,
                         "url": entry.get("url") or "https://www.youtube.com/watch?v=%s" % vid})
     return results
+
+
+def search_commons(query: str, limit: int = 4, transport: Any = None) -> List[Dict[str, Any]]:
+    """Search Wikimedia Commons videos: keyless, richly described, direct download."""
+    from .providers.miragea import urllib_transport
+    transport = transport or urllib_transport
+    params = urllib.parse.urlencode({
+        "action": "query", "format": "json", "generator": "search",
+        "gsrsearch": "%s filetype:video" % query, "gsrlimit": str(limit * 2),
+        "gsrnamespace": "6", "prop": "imageinfo", "iiprop": "url|size|mime|extmetadata"})
+    url = "https://commons.wikimedia.org/w/api.php?" + params
+    try:
+        data = transport("GET", url, {"User-Agent": USER_AGENT}, None, 20.0)
+        if data.status >= 400:
+            return []
+        pages = data.json().get("query", {}).get("pages", {})
+    except (ConnectionError, ValueError):
+        return []
+    results = []
+    for page in pages.values():
+        info = (page.get("imageinfo") or [{}])[0]
+        mime = info.get("mime", "")
+        if mime not in ("video/webm", "video/mp4", "video/ogg") or not info.get("url"):
+            continue
+        if info.get("size", 0) > MAX_SOURCE_BYTES:
+            continue
+        duration = float(info.get("duration") or 0)
+        if duration and (duration > MAX_SOURCE_SECONDS or duration < MIN_SOURCE_SECONDS):
+            continue
+        title = str(page.get("title", "")).replace("File:", "").rsplit(".", 1)[0]
+        results.append({"id": "commons-%s" % _slug(title), "title": title[:100],
+                        "channel": "Wikimedia Commons", "duration": duration,
+                        "url": info["url"], "source": "commons"})
+    return results[:limit]
+
+
+def search_pixabay(query: str, api_key: str, limit: int = 4,
+                   transport: Any = None) -> List[Dict[str, Any]]:
+    """Search Pixabay stock videos (free API key, shown when logged in at
+    https://pixabay.com/api/docs/)."""
+    from .providers.miragea import urllib_transport
+    transport = transport or urllib_transport
+    key = (api_key or "").strip() or os.environ.get("VOICEOVER_PIXABAY_KEY", "")
+    if not key:
+        raise ConfigError("A Pixabay API key is required for this source: it is free and shown "
+                          "at the top of https://pixabay.com/api/docs/ when logged in (or set "
+                          "VOICEOVER_PIXABAY_KEY).")
+    params = urllib.parse.urlencode({"key": key, "q": query, "per_page": str(limit),
+                                     "video_type": "film"})
+    url = "https://pixabay.com/api/videos/?" + params
+    try:
+        data = transport("GET", url, {"User-Agent": USER_AGENT}, None, 20.0)
+        if data.status >= 400:
+            raise ProviderError("Pixabay search failed (%d): check the API key." % data.status)
+        hits = data.json().get("hits", [])
+    except (ConnectionError, ValueError):
+        return []
+    results = []
+    for hit in hits:
+        duration = float(hit.get("duration") or 0)
+        if duration and (duration > MAX_SOURCE_SECONDS or duration < MIN_SOURCE_SECONDS):
+            continue
+        sizes = hit.get("videos") or {}
+        pick = sizes.get("large") or sizes.get("medium") or sizes.get("small") or {}
+        if not pick.get("url"):
+            continue
+        results.append({"id": "pixabay-%s" % hit.get("id"),
+                        "title": str(hit.get("tags") or query)[:100],
+                        "channel": "Pixabay", "duration": duration,
+                        "url": pick["url"], "source": "pixabay"})
+    return results
+
+
+def _is_youtube(url: str) -> bool:
+    host = urllib.parse.urlparse(url).netloc.lower()
+    return "youtube.com" in host or "youtu.be" in host
+
+
+def download_direct(url: str, dest_dir: Path, transport: Any = None) -> Tuple[Path, Dict[str, Any]]:
+    """Download a direct video file (Commons/Pixabay); no yt-dlp, no cookies needed."""
+    from .ai_video import _download
+    from .providers.miragea import urllib_transport
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    parsed = urllib.parse.urlparse(url)
+    name = _slug(Path(parsed.path).stem) or "clip"
+    dest = dest_dir / (name + (Path(parsed.path).suffix.lower() or ".mp4"))
+    _download(url, dest, transport or urllib_transport)
+    return dest, {"title": name, "duration": 0.0}
 
 
 def find_sources(client: Any, model: str, prompt: str, *, sources: int = 5,
@@ -315,6 +405,7 @@ def probe_duration(path: Path) -> float:
 
 def _fallback_segments(duration: float, n_clips: int, clip_seconds: float) -> List[Dict[str, Any]]:
     """Evenly spaced windows when there is no transcript to reason about."""
+    n_clips = max(1, min(n_clips, int(duration / clip_seconds) or 1))
     span = max(duration - clip_seconds, 0.0)
     step = span / n_clips if n_clips else span
     return [{"start": round(min(step * i + step / 4.0, span), 1),
@@ -543,16 +634,18 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
                   n_clips: Optional[int] = 3, clip_seconds: float = 10.0, stills: bool = True,
                   frame_every: float = 3.0, keep_audio: bool = False,
                   cookies: Optional[str] = None, delay: float = 10.0,
-                  keep_sources: bool = False,
+                  keep_sources: bool = False, titles: Optional[Dict[str, str]] = None,
                   sleep: Callable[[float], None] = time.sleep,
                   progress: Optional[Callable[[str], None]] = None) -> Dict[str, List[Any]]:
     """Process every URL: read metadata, pick highlights, download, cut, classify.
 
-    Only the metadata is fetched first; after the model picks the highlight
-    windows, yt-dlp downloads **just those sections** (a few MB per source
-    instead of whole gigabytes), so small disks are safe. If the partial
-    download fails, the full video (capped at 720p and 600 MB) is used as a
-    fallback. The source file is deleted once its clips are cut unless
+    YouTube URLs are handled lightly: only the metadata is fetched first; after
+    the model picks the highlight windows, yt-dlp downloads **just those
+    sections** (a few MB per source instead of whole gigabytes), so small disks
+    are safe. If the partial download fails, the full video (capped at 720p and
+    600 MB) is used as a fallback. Any other URL is treated as a direct video
+    file (Wikimedia Commons, Pixabay): plain HTTPS download, no cookies.
+    The source file is deleted once its clips are cut unless
     ``keep_sources`` is set. Waits ``delay`` seconds between YouTube requests
     to stay under the rate limits, appends every classified clip to the JSON
     catalog on disk (incrementally, so a crash never loses what was already
@@ -571,64 +664,89 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
         url = (url or "").strip()
         if not url or not url.startswith("http"):
             continue
-        if not first and delay > 0:
+        youtube = _is_youtube(url)
+        if not first and delay > 0 and youtube:
             if progress:
                 progress("Waiting %.0f s before the next video (rate limit)" % delay)
             sleep(delay)
         first = False
-        if progress:
-            progress("Reading video info for %s" % url)
-        try:
-            info = fetch_info(url, cookies=cookies)
-        except Exception as exc:
-            library["errors"].append(_download_hint(url, exc))
-            continue
-        title = str(info.get("title") or url)
-        duration = float(info.get("duration") or 0.0)
-        if duration and duration > MAX_SOURCE_SECONDS:
-            library["errors"].append("%s: skipped, %.0f min exceeds the %d-minute source limit"
-                                     % (title, duration / 60.0, MAX_SOURCE_SECONDS // 60))
-            continue
-        if progress:
-            progress("Fetching subtitles for %s" % title)
-        if delay > 0:
-            sleep(delay)
-        try:
-            transcript = fetch_transcript(url, lib_dir / "sources", cookies=cookies)
-        except ProviderError as exc:
-            library["errors"].append(str(exc))
-            continue
-        if progress:
-            progress("Picking highlights from %s" % title)
-        segments = suggest_segments(client, model, transcript, duration,
-                                    n_clips=n_clips, clip_seconds=clip_seconds, title=title)
-        if not segments:
-            library["errors"].append("%s: no reusable highlight found" % title)
-            continue
-        ranges = [(seg["start"], seg["end"]) for seg in segments]
-        path, offsets, partial = None, None, False
-        try:
-            path, info = download_video(url, lib_dir / "sources", cookies=cookies,
-                                        ranges=ranges, audio=keep_audio)
-            offsets = _range_offsets(ranges)
-            partial = True
-        except Exception as exc:
-            if _is_disk_full(exc):
-                library["errors"].append(_disk_full_message())
-                break
+        title = (titles or {}).get(url, "")
+        if youtube:
             if progress:
-                progress("Partial download failed (%s); falling back to the full video"
-                         % str(exc)[:120])
-        if path is None:
+                progress("Reading video info for %s" % url)
+            try:
+                info = fetch_info(url, cookies=cookies)
+            except Exception as exc:
+                library["errors"].append(_download_hint(url, exc))
+                continue
+            title = title or str(info.get("title") or url)
+            duration = float(info.get("duration") or 0.0)
+            if duration and duration > MAX_SOURCE_SECONDS:
+                library["errors"].append("%s: skipped, %.0f min exceeds the %d-minute source limit"
+                                         % (title, duration / 60.0, MAX_SOURCE_SECONDS // 60))
+                continue
+            if progress:
+                progress("Fetching subtitles for %s" % title)
+            if delay > 0:
+                sleep(delay)
+            try:
+                transcript = fetch_transcript(url, lib_dir / "sources", cookies=cookies)
+            except ProviderError as exc:
+                library["errors"].append(str(exc))
+                continue
+            if progress:
+                progress("Picking highlights from %s" % title)
+            segments = suggest_segments(client, model, transcript, duration,
+                                        n_clips=n_clips, clip_seconds=clip_seconds, title=title)
+            if not segments:
+                library["errors"].append("%s: no reusable highlight found" % title)
+                continue
+            ranges = [(seg["start"], seg["end"]) for seg in segments]
+            path, offsets, partial = None, None, False
             try:
                 path, info = download_video(url, lib_dir / "sources", cookies=cookies,
-                                            audio=keep_audio)
+                                            ranges=ranges, audio=keep_audio)
+                offsets = _range_offsets(ranges)
+                partial = True
             except Exception as exc:
                 if _is_disk_full(exc):
                     library["errors"].append(_disk_full_message())
                     break
-                library["errors"].append(_download_hint(url, exc))
+                if progress:
+                    progress("Partial download failed (%s); falling back to the full video"
+                             % str(exc)[:120])
+            if path is None:
+                try:
+                    path, info = download_video(url, lib_dir / "sources", cookies=cookies,
+                                                audio=keep_audio)
+                except Exception as exc:
+                    if _is_disk_full(exc):
+                        library["errors"].append(_disk_full_message())
+                        break
+                    library["errors"].append(_download_hint(url, exc))
+                    continue
+        else:
+            if progress:
+                progress("Downloading %s" % url)
+            try:
+                path, _ = download_direct(url, lib_dir / "sources")
+            except Exception as exc:
+                if _is_disk_full(exc):
+                    library["errors"].append(_disk_full_message())
+                    break
+                library["errors"].append("%s: %s" % (url, str(exc)[:200]))
                 continue
+            title = title or path.stem
+            duration = probe_duration(path)
+            transcript = ""
+            if progress:
+                progress("Picking highlights from %s" % title)
+            segments = suggest_segments(client, model, "", duration,
+                                        n_clips=n_clips, clip_seconds=clip_seconds)
+            if not segments:
+                library["errors"].append("%s: no reusable highlight found" % title)
+                continue
+            offsets, partial = None, False
         stem = _slug(title)
         aborted = False
         for j, seg in enumerate(segments, 1):

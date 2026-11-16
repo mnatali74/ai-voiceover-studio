@@ -142,18 +142,20 @@ def test_clip_search_populates_candidates(tmp_path, monkeypatch):
     from voiceover_studio.webui import clip_search
     import voiceover_studio.clips as clips
 
-    def fake_find_sources(client, model, prompt, **kwargs):
-        return ["aerial vineyards", "wine cellar barrels"], [
-            {"id": "abc", "title": "Aerial vineyard hills", "channel": "Scenery",
-             "duration": 305.0, "url": "https://youtu.be/abc", "query": "aerial vineyards"},
-            {"id": "def", "title": "Wine cellar barrels closeup", "channel": "Nature",
-             "duration": 95.0, "url": "https://youtu.be/def", "query": "wine cellar barrels"}]
+    def fake_search(query, limit=4, cookies=None):
+        return [{"id": "abc", "title": "Aerial vineyard hills", "channel": "Scenery",
+                 "duration": 305.0, "url": "https://youtu.be/abc"},
+                {"id": "def", "title": "Wine cellar barrels closeup", "channel": "Nature",
+                 "duration": 95.0, "url": "https://youtu.be/def"}]
 
-    monkeypatch.setattr(clips, "find_sources", fake_find_sources)
+    monkeypatch.setattr(clips, "search_youtube", fake_search)
+    monkeypatch.setattr(clips, "suggest_searches",
+                        lambda client, model, prompt, n=5:
+                        ["aerial vineyards", "wine cellar barrels"])
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     session = new_session(tmp_path)
     status, rows, previews, update = clip_search("enoturismo Marche", "some/model", 5, "", "",
-                                                 session)
+                                                 ["YouTube"], "", session)
     assert "**2** searches, **2** candidate" in status
     assert rows[0][1] == "Aerial vineyard hills"
     assert "youtube.com/embed/abc" in previews and "youtube.com/embed/def" in previews
@@ -174,10 +176,30 @@ def test_clip_search_uses_manual_queries_without_llm(tmp_path, monkeypatch):
     session = new_session(tmp_path)
     status, rows, previews, update = clip_search("enoturismo Marche", "best value (auto)", 5,
                                                  "aerial vineyard hills\n\nwine cellar barrels",
-                                                 "", session)
+                                                 "", ["YouTube"], "", session)
     assert "**2** searches, **2** candidate" in status
     assert rows[0][3] == "aerial vineyard hills" and rows[1][3] == "wine cellar barrels"
     assert session["clip_labels"][update["choices"][0]].endswith("aer")
+
+
+def test_clip_search_merges_commons_candidates(tmp_path, monkeypatch):
+    from voiceover_studio.webui import clip_search
+    import voiceover_studio.clips as clips
+
+    def fake_commons(query, limit=4, transport=None):
+        return [{"id": "commons-hills", "title": "Vineyard hills",
+                 "channel": "Wikimedia Commons", "duration": 42.0,
+                 "url": "https://upload.wikimedia.org/hills.webm", "source": "commons"}]
+
+    monkeypatch.setattr(clips, "search_commons", fake_commons)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    session = new_session(tmp_path)
+    status, rows, previews, update = clip_search("enoturismo", "", 5, "vineyard hills", "",
+                                                 ["Wikimedia Commons"], "", session)
+    assert rows[0][2] == "Wikimedia Commons"
+    assert "<video" in previews and "hills.webm" in previews
+    assert session["clip_titles"]["https://upload.wikimedia.org/hills.webm"] == "Vineyard hills"
+    assert session["clip_labels"][update["choices"][0]] == "https://upload.wikimedia.org/hills.webm"
 
 
 def test_clip_suggest_fills_editable_queries(tmp_path, monkeypatch):

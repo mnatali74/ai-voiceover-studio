@@ -7,9 +7,9 @@ import pytest
 from voiceover_studio.clips import (build_library, build_video_script, catalog_path,
                                     classify_clip, cut_clip, extract_frames, find_sources,
                                     load_catalog, parse_vtt, probe_duration, save_catalog,
-                                    search_youtube, select_clips, suggest_searches,
-                                    suggest_segments, title_avoids_people,
-                                    _transcript_excerpt)
+                                    search_commons, search_pixabay, search_youtube,
+                                    select_clips, suggest_searches, suggest_segments,
+                                    title_avoids_people, _transcript_excerpt)
 from voiceover_studio.errors import ConfigError
 from voiceover_studio.providers.miragea import HttpResponse
 
@@ -347,7 +347,7 @@ def test_search_youtube_filters_duration(monkeypatch):
     monkeypatch.setattr(clips, "_import_yt_dlp",
                         lambda: type("M", (), {"YoutubeDL": DurationYdl}))
     results = search_youtube("aerial", limit=4)
-    assert [r["id"] for r in results] == ["ok", "unknown"]
+    assert [r["id"] for r in results] == ["short", "ok", "unknown"]
 
 
 class FakeDownloadYdl:
@@ -529,6 +529,89 @@ def test_build_library_classifies_and_saves_catalog(fake, monkeypatch, tmp_path)
     assert library["catalog"][0]["description"] == "Green hills"
     assert load_catalog(tmp_path)[1]["segment_title"] == "Rows"
     assert sleeps == [7.0]  # pause before the subtitle fetch, none between sources
+
+
+def test_search_commons_parses_results():
+    from voiceover_studio import clips
+    from voiceover_studio.providers.miragea import HttpResponse
+    payload = {"query": {"pages": {
+        "1": {"title": "File:Vineyard hills.webm",
+              "imageinfo": [{"url": "https://upload.wikimedia.org/x.webm",
+                             "mime": "video/webm", "size": 5000000, "duration": 42.0}]},
+        "2": {"title": "File:Huge documentary.webm",
+              "imageinfo": [{"url": "https://upload.wikimedia.org/y.webm",
+                             "mime": "video/webm", "size": 1000, "duration": 4000.0}]},
+        "3": {"title": "File:Photo.jpg",
+              "imageinfo": [{"url": "https://upload.wikimedia.org/z.jpg",
+                             "mime": "image/jpeg", "size": 1000}]},
+    }}}
+
+    def transport(method, url, headers, body, timeout):
+        assert "commons.wikimedia.org" in url and "filetype%3Avideo" in url
+        return HttpResponse(200, {}, json.dumps(payload).encode())
+
+    results = search_commons("vineyard hills", limit=4, transport=transport)
+    assert len(results) == 1
+    assert results[0]["title"] == "Vineyard hills"
+    assert results[0]["source"] == "commons" and results[0]["duration"] == 42.0
+
+
+def test_search_pixabay_parses_and_requires_key(monkeypatch):
+    from voiceover_studio import clips
+    from voiceover_studio.providers.miragea import HttpResponse
+    monkeypatch.delenv("VOICEOVER_PIXABAY_KEY", raising=False)
+    with pytest.raises(ConfigError):
+        search_pixabay("vineyard", "  ", transport=lambda *a: None)
+    payload = {"hits": [{"id": 7, "tags": "vineyard, aerial", "duration": 12,
+                         "videos": {"large": {"url": "https://pixabay.com/videos/l.mp4"}}}]} 
+
+    def transport(method, url, headers, body, timeout):
+        assert "pixabay.com/api/videos" in url and "key=k" in url
+        return HttpResponse(200, {}, json.dumps(payload).encode())
+
+    results = search_pixabay("vineyard", "k", transport=transport)
+    assert results[0]["id"] == "pixabay-7" and results[0]["url"].endswith("l.mp4")
+
+
+def test_download_direct_writes_file(tmp_path):
+    from voiceover_studio import clips
+    from voiceover_studio.providers.miragea import HttpResponse
+
+    def transport(method, url, headers, body, timeout):
+        assert method == "GET" and url.endswith("hills.webm")
+        return HttpResponse(200, {}, b"webmdata")
+
+    path, info = clips.download_direct("https://upload.wikimedia.org/x/hills.webm",
+                                       tmp_path / "sources", transport=transport)
+    assert path.name == "hills.webm" and path.read_bytes() == b"webmdata"
+
+
+def test_build_library_downloads_direct_sources(fake, monkeypatch, tmp_path):
+    from voiceover_studio import clips
+    source = tmp_path / "sources" / "hills.webm"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"v")
+    monkeypatch.setattr(clips, "download_direct",
+                        lambda url, dest: (source, {"title": "hills"}))
+    monkeypatch.setattr(clips, "probe_duration", lambda path: 30.0)
+    monkeypatch.setattr(clips, "cut_clip", lambda src, start, end, dest, audio=False: dest)
+    monkeypatch.setattr(clips, "extract_frames", lambda src, dest, every=3.0: [])
+    monkeypatch.setattr(clips, "classify_clip",
+                        lambda client, model, path, title, context:
+                        {"description": "hills", "tags": []})
+    library = build_library(["https://upload.wikimedia.org/x/hills.webm"], tmp_path, None, "m",
+                            n_clips=2, clip_seconds=10.0, stills=False, delay=0.0,
+                            titles={"https://upload.wikimedia.org/x/hills.webm": "Vineyard hills"})
+    assert len(library["clips"]) == 2 and library["sources"] == ["Vineyard hills"]
+    assert library["catalog"][0]["source_title"] == "Vineyard hills"
+    assert not source.exists()
+
+
+def test_fallback_segments_respect_clip_seconds():
+    from voiceover_studio.clips import _fallback_segments
+    segments = _fallback_segments(30.0, 24, 10.0)
+    assert len(segments) == 3
+    assert all(seg["end"] - seg["start"] <= 10.0 for seg in segments)
 
 
 def test_cookie_opts_from_argument_and_env(monkeypatch):

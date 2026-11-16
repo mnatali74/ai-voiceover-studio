@@ -294,12 +294,16 @@ def ai_render(script_text: str, provider: str, language: str, speed: float, vert
 
 
 def _embed_html(candidates: List[Dict[str, Any]], limit: int = 6) -> str:
-    """Inline YouTube players for the candidates: preview without downloading."""
+    """Inline players for the candidates (YouTube iframe, direct <video> otherwise)."""
     import html as html_lib
     frames = "".join(
         '<iframe width="320" height="180" src="https://www.youtube.com/embed/%s" '
         'title="%s" loading="lazy" frameborder="0" allowfullscreen></iframe>'
         % (c["id"], html_lib.escape(c["title"][:60]))
+        if c.get("source", "youtube") == "youtube" else
+        '<video width="320" src="%s" controls preload="none" '
+        'title="%s"></video>'
+        % (html_lib.escape(c["url"], quote=True), html_lib.escape(c["title"][:60]))
         for c in candidates[:limit])
     return '<div style="display:flex;flex-wrap:wrap;gap:8px">%s</div>' % frames
 
@@ -320,34 +324,47 @@ def clip_suggest(prompt: str, model: str, sources: int, session: Dict[str, Any]
 
 
 def clip_search(prompt: str, model: str, sources: int, queries: str, cookies: str,
-                session: Dict[str, Any]
+                stock: List[str], pixabay_key: str, session: Dict[str, Any]
                 ) -> Tuple[str, List[List[Any]], str, Any]:
-    """Search queries (edited by the user, or suggested from the prompt) -> candidates."""
+    """Search queries (edited by the user, or suggested from the prompt) -> candidates
+    from the selected sources (YouTube, Wikimedia Commons, Pixabay)."""
     from .ai_video import OpenRouterClient, best_value_models
-    from .clips import find_sources, search_youtube
+    from .clips import search_commons, search_pixabay, search_youtube, suggest_searches
+    from .errors import ConfigError, ProviderError
     if not (prompt or "").strip():
         raise ValueError("Write the prompt of the video you want to build.")
     session["cookies"] = cookies or ""
     status_lines = []
     manual = [q.strip() for q in (queries or "").splitlines() if q.strip()]
     if manual:
-        queries_used, candidates, seen = manual, [], set()
-        for query in manual:
-            status_lines.append("- Searching YouTube: %s" % query)
-            for item in search_youtube(query, limit=4, cookies=cookies):
-                if item["id"] not in seen:
-                    seen.add(item["id"])
-                    candidates.append({"query": query, **item})
+        queries_used = manual
     else:
         client = OpenRouterClient()
         if model in ("", "best value (auto)"):
             model = best_value_models(client)[0]
         status_lines.append("Searching with model **%s**..." % model)
-        queries_used, candidates = find_sources(client, model, prompt, sources=int(sources),
-                                                cookies=cookies,
-                                                progress=lambda msg: status_lines.append("- %s" % msg))
+        queries_used = suggest_searches(client, model, prompt, n=int(sources))
+    candidates, seen = [], set()
+    for query in queries_used:
+        status_lines.append("- Searching: %s" % query)
+        for source in (stock or ["YouTube"]):
+            try:
+                if source == "Wikimedia Commons":
+                    items = search_commons(query, limit=4)
+                elif source == "Pixabay":
+                    items = search_pixabay(query, pixabay_key, limit=4)
+                else:
+                    items = search_youtube(query, limit=4, cookies=cookies)
+            except (ConfigError, ProviderError) as exc:
+                status_lines.append("  - %s unavailable: %s" % (source, str(exc)[:150]))
+                continue
+            for item in items:
+                if item["id"] not in seen:
+                    seen.add(item["id"])
+                    candidates.append({"query": query, **item})
     session["clip_candidates"] = candidates
     session["clip_labels"] = {}
+    session["clip_titles"] = {c["url"]: c["title"] for c in candidates}
     labels = []
     for c in candidates:
         label = "%s — %s (%s)" % (c["title"][:70], c["channel"] or "?",
@@ -356,8 +373,8 @@ def clip_search(prompt: str, model: str, sources: int, queries: str, cookies: st
         session["clip_labels"][label] = c["url"]
     rows = [[i + 1, c["title"], c["channel"] or "?", c["query"]]
             for i, c in enumerate(candidates)]
-    status = ("**%d** searches, **%d** candidate videos (people-focused titles, videos under "
-              "30 s and over 30 min filtered out). Watch the previews, then select the videos "
+    status = ("**%d** searches, **%d** candidate videos (people-focused titles and videos over "
+              "30 min filtered out). Watch the previews, then select the videos "
               "to download below.\n\n%s"
               % (len(queries_used), len(candidates), "\n".join(status_lines)))
     return status, rows, _embed_html(candidates), gr.update(choices=labels, value=[])
@@ -388,6 +405,7 @@ def clip_build(picks: List[str], manual_urls: str, model: str, all_clips: bool, 
                             n_clips=None if all_clips else int(n_clips),
                             clip_seconds=float(clip_seconds), stills=bool(stills),
                             delay=float(delay), cookies=session.get("cookies", ""),
+                            titles=session.get("clip_titles") or {},
                             progress=lambda msg: status_lines.append("- %s" % msg))
     session["library"] = library
     picks_all = library["clips"] + library["frames"]
@@ -640,6 +658,14 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                                "cheapest capable model")
                 clip_sources = gr.Slider(3, 10, value=5, step=1,
                                          label="Video sources to search (min 3)")
+            with gr.Row():
+                clip_stock = gr.CheckboxGroup(choices=["YouTube", "Wikimedia Commons", "Pixabay"],
+                                              value=["YouTube", "Wikimedia Commons"],
+                                              label="Sources to search (Commons is keyless and "
+                                                    "has precise descriptions, no bot checks)")
+                clip_pixabay = gr.Textbox(label="Pixabay API key (optional) — free, shown at the "
+                                                "top of pixabay.com/api/docs/ when logged in",
+                                          value="", lines=1)
             clip_cookies = gr.Textbox(label="Cookies file (optional) — path to a cookies.txt "
                                             "export, needed when YouTube asks to sign in",
                                       value="", lines=1,
@@ -701,7 +727,8 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                       outputs=[clip_suggest_status, clip_queries])
             clip_search_button.click(clip_search,
                                      inputs=[clip_prompt, clip_model, clip_sources,
-                                             clip_queries, clip_cookies, session],
+                                             clip_queries, clip_cookies, clip_stock,
+                                             clip_pixabay, session],
                                      outputs=[clip_search_status, clip_results, clip_previews,
                                               clip_pick])
             clip_button.click(clip_build,
