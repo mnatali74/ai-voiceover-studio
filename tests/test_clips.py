@@ -3,8 +3,9 @@ import json
 
 import pytest
 
-from voiceover_studio.clips import (build_library, cut_clip, extract_frames, parse_vtt,
-                                    probe_duration, suggest_segments)
+from voiceover_studio.clips import (build_library, cut_clip, extract_frames, find_sources,
+                                    parse_vtt, probe_duration, search_youtube, suggest_searches,
+                                    suggest_segments, title_avoids_people)
 from voiceover_studio.errors import ConfigError
 from voiceover_studio.providers.miragea import HttpResponse
 
@@ -66,6 +67,9 @@ def test_cut_clip_uses_stream_copy(monkeypatch, tmp_path):
     assert calls[0][:2] == ["-ss", "5.00"]
     assert "-t" in calls[0] and "7.50" in calls[0]
     assert "-c" in calls[0] and "copy" in calls[0]
+    assert "-an" in calls[0]
+    cut_clip(src, 5.0, 12.5, tmp_path / "out" / "audio.mp4", audio=True)
+    assert "-an" not in calls[1]
 
 
 def test_cut_clip_requires_ffmpeg(monkeypatch, tmp_path):
@@ -118,7 +122,8 @@ def test_build_library_cuts_suggested_segments(fake, monkeypatch, tmp_path):
     monkeypatch.setattr(clips, "probe_duration", lambda path: 120.0)
     cut, frames = [], []
     monkeypatch.setattr(clips, "cut_clip",
-                        lambda src, start, end, dest: (cut.append((start, end)), dest)[1])
+                        lambda src, start, end, dest, audio=False:
+                        (cut.append((start, end)), dest)[1])
     monkeypatch.setattr(clips, "extract_frames",
                         lambda src, dest, every=3.0: frames.append(dest)
                         or [dest / "frame_001.jpg", dest / "frame_002.jpg"])
@@ -151,12 +156,70 @@ def test_build_library_continues_after_download_failure(fake, monkeypatch, tmp_p
 
     monkeypatch.setattr(clips, "download_video", fake_download)
     monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "")
-    monkeypatch.setattr(clips, "cut_clip", lambda src, start, end, dest: dest)
+    monkeypatch.setattr(clips, "cut_clip", lambda src, start, end, dest, audio=False: dest)
     monkeypatch.setattr(clips, "extract_frames", lambda src, dest, every=3.0: [])
     library = build_library(["https://youtu.be/blocked", "https://youtu.be/ok"],
                             tmp_path, None, "m", n_clips=1, clip_seconds=10.0, stills=False)
     assert len(library["clips"]) == 1 and library["sources"] == ["Good video"]
     assert "bot check" in library["errors"][0] and "cookies.txt" in library["errors"][0]
+
+
+def test_title_avoids_people_filters_subjects():
+    assert title_avoids_people("Aerial drone view of Tuscan vineyards at sunset")
+    assert not title_avoids_people("My VLOG: wine tasting in Tuscany")
+    assert not title_avoids_people("Wine TUTORIAL for beginners")
+
+
+def test_suggest_searches_parses_query_list(fake):
+    queries_json = '["aerial drone vineyard hills", "italian countryside sunset", "wine cellar barrels"]'
+    client = chat_client(fake, queries_json)
+    queries = suggest_searches(client, "m", "enoturismo nelle Marche", n=3)
+    assert queries == ["aerial drone vineyard hills", "italian countryside sunset",
+                       "wine cellar barrels"]
+
+
+class FakeYdl:
+    def __init__(self, opts):
+        FakeYdl.opts = opts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def extract_info(self, url, download=False):
+        assert url.startswith("ytsearch") and download is False
+        return {"entries": [
+            {"id": "abc", "title": "Aerial drone vineyard hills", "duration": 300,
+             "channel": "Scenery HD", "url": "https://www.youtube.com/watch?v=abc"},
+            {"id": "bad", "title": "Wine tasting VLOG with friends", "duration": 600,
+             "channel": "People TV", "url": "https://www.youtube.com/watch?v=bad"},
+            {"id": "def", "title": "Italian countryside sunset", "duration": 240,
+             "channel": "Nature", "url": None},
+        ]}
+
+
+def test_search_youtube_flat_and_filtered(monkeypatch):
+    from voiceover_studio import clips
+    monkeypatch.setattr(clips, "_import_yt_dlp",
+                        lambda: type("M", (), {"YoutubeDL": FakeYdl}))
+    results = search_youtube("vineyard aerial", limit=3)
+    assert [r["id"] for r in results] == ["abc", "def"]
+    assert results[1]["url"].endswith("watch?v=def")
+    assert FakeYdl.opts["extract_flat"] is True
+
+
+def test_find_sources_deduplicates_across_queries(fake, monkeypatch):
+    from voiceover_studio import clips
+    monkeypatch.setattr(clips, "search_youtube",
+                        lambda query, limit=4, cookies=None: [
+                            {"id": "abc", "title": "Aerial hills", "channel": "C",
+                             "duration": 120.0, "url": "https://youtu.be/abc"}])
+    client = chat_client(fake, '["q1", "q2", "q3"]')
+    queries, candidates = find_sources(client, "m", "vineyards", sources=3)
+    assert queries == ["q1", "q2", "q3"]
+    assert len(candidates) == 1 and candidates[0]["query"] == "q1"
 
 
 def test_cookie_opts_from_argument_and_env(monkeypatch):

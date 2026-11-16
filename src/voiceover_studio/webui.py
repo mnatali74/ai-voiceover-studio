@@ -292,27 +292,76 @@ def ai_render(script_text: str, provider: str, language: str, speed: float, vert
     return render_video_clip(text, provider, language, speed, vertical, style, music, None, session)
 
 
-def clip_build(urls: str, model: str, n_clips: int, clip_seconds: float, stills: bool,
-               cookies: str, session: Dict[str, Any]
+def _embed_html(candidates: List[Dict[str, Any]], limit: int = 6) -> str:
+    """Inline YouTube players for the candidates: preview without downloading."""
+    import html as html_lib
+    frames = "".join(
+        '<iframe width="320" height="180" src="https://www.youtube.com/embed/%s" '
+        'title="%s" loading="lazy" frameborder="0" allowfullscreen></iframe>'
+        % (c["id"], html_lib.escape(c["title"][:60]))
+        for c in candidates[:limit])
+    return '<div style="display:flex;flex-wrap:wrap;gap:8px">%s</div>' % frames
+
+
+def clip_search(prompt: str, model: str, sources: int, cookies: str, session: Dict[str, Any]
+                ) -> Tuple[str, List[List[Any]], str, Any]:
+    """Prompt -> varied YouTube searches -> candidate B-roll videos (preview only)."""
+    from .ai_video import OpenRouterClient, best_value_models
+    from .clips import find_sources
+    if not (prompt or "").strip():
+        raise ValueError("Write the prompt of the video you want to build.")
+    client = OpenRouterClient()
+    if model in ("", "best value (auto)"):
+        model = best_value_models(client)[0]
+    status_lines = ["Searching with model **%s**..." % model]
+    session["cookies"] = cookies or ""
+    queries, candidates = find_sources(client, model, prompt, sources=int(sources),
+                                       cookies=cookies,
+                                       progress=lambda msg: status_lines.append("- %s" % msg))
+    session["clip_candidates"] = candidates
+    session["clip_labels"] = {}
+    labels = []
+    for c in candidates:
+        label = "%s — %s (%s)" % (c["title"][:70], c["channel"] or "?",
+                                  "%d:%02d" % (int(c["duration"] // 60), int(c["duration"] % 60)))
+        labels.append(label)
+        session["clip_labels"][label] = c["url"]
+    rows = [[i + 1, c["title"], c["channel"] or "?", c["query"]]
+            for i, c in enumerate(candidates)]
+    status = ("**%d** searches, **%d** candidate videos (people-focused titles filtered out). "
+              "Watch the previews, then select the videos to download below.\n\n%s"
+              % (len(queries), len(candidates), "\n".join(status_lines)))
+    return status, rows, _embed_html(candidates), gr.update(choices=labels, value=[])
+
+
+def clip_build(picks: List[str], manual_urls: str, model: str, n_clips: int,
+               clip_seconds: float, stills: bool, session: Dict[str, Any]
                ) -> Tuple[str, List[str], List[Tuple[str, str]], Any]:
-    """YouTube URLs -> highlight clips + still frames stored in the session library."""
+    """Selected (or manually pasted) YouTube URLs -> audio-free clips + frames."""
     from .ai_video import OpenRouterClient, best_value_models
     from .clips import build_library
-    links = [u for u in (urls or "").split() if u.startswith("http")]
-    if not links:
-        raise ValueError("Paste at least one YouTube link (https://...).")
+    labels = session.get("clip_labels") or {}
+    links = [labels[p] for p in (picks or []) if p in labels]
+    links += [u for u in (manual_urls or "").split() if u.startswith("http")]
+    seen, urls = set(), []
+    for link in links:
+        if link not in seen:
+            seen.add(link)
+            urls.append(link)
+    if not urls:
+        raise ValueError("Select at least one video source (or paste a link manually).")
     client = OpenRouterClient()
     if model in ("", "best value (auto)"):
         model = best_value_models(client)[0]
     workdir = Path(session["dir"])
     status_lines = ["Working with model **%s**..." % model]
-    library = build_library(links, workdir, client, model, n_clips=int(n_clips),
+    library = build_library(urls, workdir, client, model, n_clips=int(n_clips),
                             clip_seconds=float(clip_seconds), stills=bool(stills),
-                            cookies=cookies,
+                            cookies=session.get("cookies", ""),
                             progress=lambda msg: status_lines.append("- %s" % msg))
     session["library"] = library
-    picks = library["clips"] + library["frames"]
-    status = ("**%d** clips and **%d** frames from %d video(s), model **%s**.\n\n%s"
+    picks_all = library["clips"] + library["frames"]
+    status = ("**%d** audio-free clips and **%d** frames from %d video(s), model **%s**.\n\n%s"
               % (len(library["clips"]), len(library["frames"]), len(library["sources"]),
                  model, "\n".join(status_lines)))
     for error in library.get("errors", []):
@@ -321,7 +370,7 @@ def clip_build(urls: str, model: str, n_clips: int, clip_seconds: float, stills:
         status += "\n- %s — %s (%.0fs→%.0fs)" % (seg["title"], seg["source"],
                                                   seg["start"], seg["end"])
     frames_gallery = [(f, Path(f).parent.name) for f in library["frames"][:60]]
-    return status, library["clips"], frames_gallery, gr.update(choices=picks, value=[])
+    return status, library["clips"], frames_gallery, gr.update(choices=picks_all, value=[])
 
 
 
@@ -485,35 +534,56 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                    outputs=[ai_video_status, ai_video_out])
 
         with gr.Tab("Clip studio"):
-            gr.Markdown("Paste YouTube links: the studio downloads each video, reads its "
-                        "subtitles, and an OpenRouter model picks the most reusable highlight "
-                        "segments. Every clip is cut with ffmpeg and meaningful still frames are "
-                        "extracted; pick them in the **Video** tab to use them as B-roll. "
+            gr.Markdown("Describe the video you are building: the model turns the prompt into "
+                        "varied YouTube searches (at least 5 different sources, people-focused "
+                        "titles filtered out), you **preview the candidates right here without "
+                        "downloading**, select the ones you like, and the studio downloads them, "
+                        "picks the highlight segments, and cuts **audio-free** clips plus still "
+                        "frames to reuse as B-roll in the **Video** tab. "
                         "Needs `OPENROUTER_API_KEY`, [yt-dlp](https://github.com/yt-dlp/yt-dlp) "
-                        "(`pip install \"ai-voiceover-studio[clip]\"`) and ffmpeg.")
-            clip_urls = gr.Textbox(label="YouTube links (one or more, one per line)", lines=3,
-                                   placeholder="https://www.youtube.com/watch?v=...\n"
-                                               "https://youtu.be/...")
+                        "(`pip install \"ai-voiceover-studio[clip]\"`), a JavaScript runtime "
+                        "(deno) and ffmpeg.")
+            clip_prompt = gr.Textbox(label="Prompt of the video to build", lines=2,
+                                     placeholder="Es.: video promozionale sull'enoturismo nelle "
+                                                 "Marche, stile documentaristico")
             with gr.Row():
                 clip_model = gr.Dropdown(choices=["best value (auto)"] + DEFAULT_MODELS,
                                          value="best value (auto)", allow_custom_value=True,
                                          label="Model (OpenRouter) — 'best value' picks the "
                                                "cheapest capable model")
-                clip_n = gr.Slider(1, 6, value=3, step=1, label="Clips per video")
-                clip_len = gr.Slider(5, 30, value=10, step=1, label="Clip length (s)")
-            clip_stills = gr.Checkbox(value=True, label="Also extract still frames from the clips")
+                clip_sources = gr.Slider(3, 10, value=5, step=1,
+                                         label="Video sources to search (min 3)")
             clip_cookies = gr.Textbox(label="Cookies file (optional) — path to a cookies.txt "
                                             "export, needed when YouTube asks to sign in",
                                       value="", lines=1,
                                       placeholder="/percorso/cookies.txt")
-            clip_button = gr.Button("Download, pick highlights and cut clips", variant="primary")
+            clip_search_button = gr.Button("Find video sources on YouTube", variant="primary")
+            clip_search_status = gr.Markdown()
+            clip_results = gr.Dataframe(headers=["#", "Title", "Channel", "Search"],
+                                        label="Candidate videos")
+            clip_previews = gr.HTML()
+            clip_pick = gr.CheckboxGroup(choices=[], label="Select the videos to download "
+                                                          "and cut", value=[])
+            with gr.Row():
+                clip_n = gr.Slider(1, 6, value=2, step=1, label="Clips per video")
+                clip_len = gr.Slider(5, 30, value=10, step=1, label="Clip length (s)")
+            clip_stills = gr.Checkbox(value=True, label="Also extract still frames from the clips")
+            clip_manual = gr.Textbox(label="Or paste YouTube links manually (optional)", lines=2,
+                                     placeholder="https://www.youtube.com/watch?v=...")
+            clip_button = gr.Button("Download selected videos, pick highlights and cut clips",
+                                    variant="primary")
             clip_status = gr.Markdown()
             with gr.Row():
-                clip_files = gr.Files(label="Cut clips (reuse them as B-roll)")
+                clip_files = gr.Files(label="Cut clips — audio-free (reuse them as B-roll)")
                 clip_frames = gr.Gallery(label="Extracted frames", columns=6, height=260)
+            clip_search_button.click(clip_search,
+                                     inputs=[clip_prompt, clip_model, clip_sources,
+                                             clip_cookies, session],
+                                     outputs=[clip_search_status, clip_results, clip_previews,
+                                              clip_pick])
             clip_button.click(clip_build,
-                              inputs=[clip_urls, clip_model, clip_n, clip_len, clip_stills,
-                                      clip_cookies, session],
+                              inputs=[clip_pick, clip_manual, clip_model, clip_n, clip_len,
+                                      clip_stills, session],
                               outputs=[clip_status, clip_files, clip_frames, library_pick])
 
     return app

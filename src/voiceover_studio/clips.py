@@ -35,6 +35,18 @@ CLIP_SYSTEM = (
     "avoid segments that depend on earlier context."
 )
 
+SEARCH_SYSTEM = (
+    "You are a stock-footage researcher. The user describes the video they are building. "
+    "Respond with ONLY a JSON array of {n} different YouTube search queries (short, English) "
+    "that would find cinematic B-roll for it. Rules: favor landscapes, aerial and drone shots, "
+    "nature, cityscapes, close-ups of objects and places; avoid videos whose subject is people "
+    "(no vlogs, tutorials, interviews, talking heads). Every query must target a different "
+    "visual angle so the final video draws from several distinct sources."
+)
+
+_HUMAN_WORDS = re.compile(r"\b(vlog|vlogs|tutorial|interview|podcast|unboxing|review|reviews|"
+                          r"talking|webinar|webcam|facecam|selfie|reaction|q&a|storytime)\b", re.I)
+
 
 def _import_yt_dlp():
     try:
@@ -66,6 +78,67 @@ def _download_hint(url: str, exc: Exception) -> str:
                 "or VOICEOVER_YTDLP_COOKIES_FROM_BROWSER=chrome. Detail: %s"
                 % (url, message[:160]))
     return "%s: %s" % (url, message[:200])
+
+
+def title_avoids_people(title: str) -> bool:
+    """Cheap heuristic: drop videos whose title suggests people as the subject."""
+    return not _HUMAN_WORDS.search(title or "")
+
+
+def suggest_searches(client: Any, model: str, prompt: str, n: int = 5) -> List[str]:
+    """LLM turns the video prompt into n varied B-roll search queries."""
+    from .ai_video import _parse_json
+    prompt = (prompt or "").strip()
+    if not prompt:
+        raise ValueError("Write the prompt of the video you want to build.")
+    content = client.chat(model, [{"role": "system", "content": SEARCH_SYSTEM.format(n=n)},
+                                  {"role": "user", "content": prompt}])
+    raw = _parse_json(content)
+    if not isinstance(raw, list):
+        raise ConfigError("The model did not return a list of search queries.")
+    queries = [str(q).strip() for q in raw if isinstance(q, str) and str(q).strip()][:n]
+    if not queries:
+        raise ConfigError("No usable search queries were returned.")
+    return queries
+
+
+def search_youtube(query: str, limit: int = 4,
+                   cookies: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Search YouTube (no download) and return candidate videos without people-focused titles."""
+    yt_dlp = _import_yt_dlp()
+    opts = {"extract_flat": True, "quiet": True, "no_warnings": True,
+            "noplaylist": True, **_cookie_opts(cookies)}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        data = ydl.extract_info("ytsearch%d:%s" % (limit, query), download=False) or {}
+    results = []
+    for entry in data.get("entries") or []:
+        vid = entry.get("id") or entry.get("url", "")
+        title = str(entry.get("title") or "")
+        if not vid or not title_avoids_people(title):
+            continue
+        results.append({"id": vid, "title": title,
+                        "channel": str(entry.get("channel") or entry.get("uploader") or ""),
+                        "duration": float(entry.get("duration") or 0),
+                        "url": entry.get("url") or "https://www.youtube.com/watch?v=%s" % vid})
+    return results
+
+
+def find_sources(client: Any, model: str, prompt: str, *, sources: int = 5,
+                 per_query: int = 4, cookies: Optional[str] = None,
+                 progress: Optional[Callable[[str], None]] = None
+                 ) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Prompt -> varied searches -> candidate videos from at least ``sources`` queries."""
+    queries = suggest_searches(client, model, prompt, n=max(1, sources))
+    candidates: List[Dict[str, Any]] = []
+    seen = set()
+    for query in queries:
+        if progress:
+            progress("Searching YouTube: %s" % query)
+        for item in search_youtube(query, limit=per_query, cookies=cookies):
+            if item["id"] not in seen:
+                seen.add(item["id"])
+                candidates.append({"query": query, **item})
+    return queries, candidates
 
 
 def _slug(text: str) -> str:
@@ -218,14 +291,23 @@ def suggest_segments(client: Any, model: str, transcript: str, duration: float,
     return segments or _fallback_segments(duration, n_clips, clip_seconds)
 
 
-def cut_clip(src: Path, start: float, end: float, dest: Path) -> Path:
-    """Stream-copy [start, end] of ``src`` into ``dest`` (fast, no re-encode)."""
+def cut_clip(src: Path, start: float, end: float, dest: Path,
+             audio: bool = False) -> Path:
+    """Stream-copy [start, end] of ``src`` into ``dest`` (fast, no re-encode).
+
+    Audio is dropped by default: the clips are B-roll, the final video gets its own
+    voiceover and music.
+    """
     from .audio import _ffmpeg, ffmpeg_path
     if not ffmpeg_path():
         raise ConfigError("ffmpeg is required to cut clips (https://ffmpeg.org).")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    _ffmpeg(["-ss", "%.2f" % max(0.0, start), "-i", str(src),
-             "-t", "%.2f" % max(0.5, end - start), "-c", "copy", str(dest)])
+    args = ["-ss", "%.2f" % max(0.0, start), "-i", str(src),
+            "-t", "%.2f" % max(0.5, end - start), "-c", "copy"]
+    if not audio:
+        args.append("-an")
+    args.append(str(dest))
+    _ffmpeg(args)
     return dest
 
 
@@ -245,7 +327,8 @@ def extract_frames(src: Path, dest_dir: Path, every: float = 3.0,
 
 def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
                   n_clips: int = 3, clip_seconds: float = 10.0, stills: bool = True,
-                  frame_every: float = 3.0, cookies: Optional[str] = None,
+                  frame_every: float = 3.0, keep_audio: bool = False,
+                  cookies: Optional[str] = None,
                   progress: Optional[Callable[[str], None]] = None) -> Dict[str, List[Any]]:
     """Process every URL: download, pick highlights, cut clips, extract stills.
 
@@ -280,7 +363,8 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
         stem = _slug(title)
         for j, seg in enumerate(segments, 1):
             clip_path = cut_clip(path, seg["start"], seg["end"],
-                                 workdir / "clips" / ("%s_%02d.mp4" % (stem, j)))
+                                 workdir / "clips" / ("%s_%02d.mp4" % (stem, j)),
+                                 audio=keep_audio)
             library["clips"].append(str(clip_path))
             library["segments"].append({"source": title, **seg})
             if stills:

@@ -119,20 +119,21 @@ for the scene plan and the vision check.
 
 ## Clip studio: reuse YouTube footage
 
-The *Clip studio* tab turns YouTube links into a personal B-roll library. Paste one or more URLs,
-and for each video the studio downloads the source (yt-dlp, up to 1080p), reads its manual or
-automatic subtitles, and asks the OpenRouter model you chose to pick the most reusable,
-self-contained highlight segments. The model can be picked manually or left on *best value (auto)*,
-which ranks the OpenRouter catalogue by price per token. Every highlight is cut into a standalone
-mp4 with ffmpeg and meaningful still frames are extracted from the clips. Everything lands in the
-session library and shows up in the *Video* tab, where you tick exactly which clips and frames to
-reuse as B-roll. A URL that fails is reported and the rest of the batch continues. When YouTube
-answers "Sign in to confirm you're not a bot", make sure a JavaScript runtime is installed —
-recent yt-dlp needs [deno](https://docs.deno.com/runtime/getting_started/installation/) (or Node)
-on the machine to solve YouTube's challenges — and export your browser cookies to a cookies.txt
-file and point the studio at it: set the cookies field in the tab, or
-`VOICEOVER_YTDLP_COOKIES=/path/cookies.txt`, or `VOICEOVER_YTDLP_COOKIES_FROM_BROWSER=chrome`.
-Extra:
+The *Clip studio* tab turns a prompt into a personal B-roll library. Write what the video is
+about, and the OpenRouter model turns the prompt into several varied YouTube searches (at least
+five different sources, so no single video gets copied; people-focused titles like vlogs,
+tutorials and interviews are filtered out). You **preview the candidates inline without
+downloading** anything, tick the videos you like (or paste links manually), and the studio then
+downloads each source, reads its subtitles, asks the model to pick the most reusable,
+self-contained highlight segments, and cuts them into standalone **audio-free** mp4 clips with
+meaningful still frames extracted. Everything lands in the session library and shows up in the
+*Video* tab, where you tick exactly which clips and frames to reuse as B-roll. A URL that fails
+is reported and the rest of the batch continues. When YouTube answers "Sign in to confirm you're
+not a bot", make sure a JavaScript runtime is installed — recent yt-dlp needs
+[deno](https://docs.deno.com/runtime/getting_started/installation/) (or Node) on the machine to
+solve YouTube's challenges — and export your browser cookies to a cookies.txt file and point the
+studio at it: set the cookies field in the tab, or `VOICEOVER_YTDLP_COOKIES=/path/cookies.txt`,
+or `VOICEOVER_YTDLP_COOKIES_FROM_BROWSER=chrome`. Extra:
 `pip install "ai-voiceover-studio[clip]"`; needs ffmpeg.
 
 ## Why this exists

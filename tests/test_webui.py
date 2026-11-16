@@ -138,24 +138,49 @@ def test_save_broll_includes_library_picks(tmp_path):
     assert folder is not None and list(folder.glob("*clip_01.mp4"))
 
 
-def test_clip_build_populates_library(tmp_path, monkeypatch):
+def test_clip_search_populates_candidates(tmp_path, monkeypatch):
+    from voiceover_studio.webui import clip_search
+    import voiceover_studio.clips as clips
+
+    def fake_find_sources(client, model, prompt, **kwargs):
+        return ["aerial vineyards", "wine cellar barrels"], [
+            {"id": "abc", "title": "Aerial vineyard hills", "channel": "Scenery",
+             "duration": 305.0, "url": "https://youtu.be/abc", "query": "aerial vineyards"},
+            {"id": "def", "title": "Wine cellar barrels closeup", "channel": "Nature",
+             "duration": 95.0, "url": "https://youtu.be/def", "query": "wine cellar barrels"}]
+
+    monkeypatch.setattr(clips, "find_sources", fake_find_sources)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    status, rows, previews, update = clip_search("enoturismo Marche", "some/model", 5, "", session)
+    assert "**2** searches, **2** candidate" in status
+    assert rows[0][1] == "Aerial vineyard hills"
+    assert "youtube.com/embed/abc" in previews and "youtube.com/embed/def" in previews
+    assert update["choices"][0].startswith("Aerial vineyard hills")
+    assert session["clip_labels"][update["choices"][0]] == "https://youtu.be/abc"
+
+
+def test_clip_build_uses_selected_sources(tmp_path, monkeypatch):
     import voiceover_studio.clips as clips
     from voiceover_studio.webui import clip_build
 
     def fake_build(urls, workdir, client, model, **kwargs):
-        assert urls == ["https://youtu.be/abc"]
+        assert urls == ["https://youtu.be/abc", "https://youtu.be/xyz"]
+        assert kwargs.get("keep_audio", False) is False
         return {"clips": [str(workdir / "clip_library" / "clips" / "c_01.mp4")],
                 "frames": [str(workdir / "clip_library" / "frames" / "f_001.jpg")],
                 "segments": [{"source": "Vineyards", "title": "Drone shot", "start": 5.0,
                               "end": 15.0, "reason": "b-roll"}],
-                "sources": ["Vineyards"]}
+                "sources": ["Vineyards"], "errors": []}
 
     monkeypatch.setattr(clips, "build_library", fake_build)
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     session = new_session(tmp_path)
-    status, clip_files, frames, update = clip_build("https://youtu.be/abc", "some/model",
-                                                    3, 10, True, "", session)
-    assert "clips and **1** frames" in status and "Drone shot" in status
+    session["clip_labels"] = {"Aerial hills — C (5:00)": "https://youtu.be/abc"}
+    status, clip_files, frames, update = clip_build(["Aerial hills — C (5:00)"],
+                                                    "https://youtu.be/xyz", "some/model",
+                                                    2, 10, True, session)
+    assert "audio-free clips and **1** frames" in status and "Drone shot" in status
     assert clip_files[0].endswith("c_01.mp4")
     assert update["choices"][0].endswith("c_01.mp4")
     assert session["library"]["clips"]
