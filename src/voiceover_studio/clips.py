@@ -63,8 +63,8 @@ SELECT_SYSTEM = (
     "video. Respond with ONLY a JSON array, ordered as the final video, no markdown fences:\n"
     '[{{"id": "<clip id from the catalog>", "narration": "one spoken sentence in {language} "'
     '"for this shot"}}]\n'
-    "Choose the 3 to 8 clips whose descriptions and tags best match the idea, never reuse a "
-    "clip twice, and make the first shot a strong visual hook."
+    "Choose the 3 to {max_shots} clips whose descriptions and tags best match the idea, never "
+    "reuse a clip twice, and make the first shot a strong visual hook."
 )
 
 SEARCH_SYSTEM = (
@@ -564,7 +564,7 @@ def classify_clip(client: Any, model: str, clip_path: Path, source_title: str,
 
 
 def select_clips(client: Any, model: str, prompt: str, catalog: List[Dict[str, Any]],
-                 language: str = "the user's language") -> List[Dict[str, Any]]:
+                 language: str = "the user's language", max_shots: int = 8) -> List[Dict[str, Any]]:
     """Prompt + catalog -> ordered [{entry, narration}] for the final video."""
     from .ai_video import _parse_json
     prompt = (prompt or "").strip()
@@ -578,7 +578,9 @@ def select_clips(client: Any, model: str, prompt: str, catalog: List[Dict[str, A
            ", ".join(entry.get("tags") or []), entry.get("camera", ""),
            entry.get("has_people"))
         for entry in catalog)
-    content = client.chat(model, [{"role": "system", "content": SELECT_SYSTEM.format(language=language)},
+    content = client.chat(model, [{"role": "system",
+                                   "content": SELECT_SYSTEM.format(language=language,
+                                                                   max_shots=max(3, max_shots))},
                                   {"role": "user", "content": "Video idea: %s\n\nCatalog:\n%s"
                                    % (prompt, listing[:24000])}])
     raw = _parse_json(content)
@@ -596,7 +598,7 @@ def select_clips(client: Any, model: str, prompt: str, catalog: List[Dict[str, A
         used.add(entry.get("id"))
         selected.append({"entry": entry,
                          "narration": str(item.get("narration", "")).strip()[:400]})
-        if len(selected) >= 8:
+        if len(selected) >= max(3, max_shots):
             break
     if not selected:
         raise ConfigError("None of the chosen clips is in the catalog.")
@@ -625,9 +627,26 @@ def fetch_info(url: str, cookies: Optional[str] = None) -> Dict[str, Any]:
         return ydl.extract_info(url, download=False) or {}
 
 
+def _per_source_cap(n_clips: Optional[int], target_clips: Optional[int],
+                    collected: int, per_source: int) -> Optional[int]:
+    """How many clips to extract from this source given the remaining budget."""
+    if target_clips is None:
+        return n_clips
+    remaining = max(1, target_clips - collected)
+    cap = min(per_source, remaining)
+    return cap if n_clips is None else min(cap, n_clips)
+
+
 def _disk_full_message() -> str:
     return ("No space left on disk. Free some space (check `df -h ~`, remove old sessions "
             "under studio_out/ and the files in clip_library/sources/) and retry.")
+
+
+def estimate_needs(duration: float, clip_seconds: float = 10.0) -> Tuple[int, int]:
+    """Final video duration -> (shots, sources) needed in the clip library."""
+    shots = max(3, round(duration / max(2.0, clip_seconds)))
+    sources = max(2, -(-shots // 3))
+    return shots, sources
 
 
 def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
@@ -635,6 +654,7 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
                   frame_every: float = 3.0, keep_audio: bool = False,
                   cookies: Optional[str] = None, delay: float = 10.0,
                   keep_sources: bool = False, titles: Optional[Dict[str, str]] = None,
+                  target_clips: Optional[int] = None, per_source: int = 3,
                   sleep: Callable[[float], None] = time.sleep,
                   progress: Optional[Callable[[str], None]] = None) -> Dict[str, List[Any]]:
     """Process every URL: read metadata, pick highlights, download, cut, classify.
@@ -650,9 +670,11 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
     to stay under the rate limits, appends every classified clip to the JSON
     catalog on disk (incrementally, so a crash never loses what was already
     processed), and reports failures per URL, per clip and on a full disk in
-    ``library["errors"]`` without losing the rest. Returns ``{"clips",
-    "frames", "segments", "sources", "errors", "catalog"}`` under
-    ``workdir/clip_library``.
+    ``library["errors"]`` without losing the rest. With ``target_clips`` the
+    batch **stops as soon as enough clips are collected** and each source
+    contributes at most ``per_source`` clips, so no more videos than necessary
+    are downloaded. Returns ``{"clips", "frames", "segments", "sources",
+    "errors", "catalog"}`` under ``workdir/clip_library``.
     """
     workdir = Path(workdir)
     lib_dir = workdir / "clip_library"
@@ -664,6 +686,11 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
         url = (url or "").strip()
         if not url or not url.startswith("http"):
             continue
+        if target_clips is not None and len(library["clips"]) >= target_clips:
+            if progress:
+                progress("Enough clips collected (%d/%d); stopping before %s"
+                         % (len(library["clips"]), target_clips, url))
+            break
         youtube = _is_youtube(url)
         if not first and delay > 0 and youtube:
             if progress:
@@ -697,7 +724,9 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
             if progress:
                 progress("Picking highlights from %s" % title)
             segments = suggest_segments(client, model, transcript, duration,
-                                        n_clips=n_clips, clip_seconds=clip_seconds, title=title)
+                                        n_clips=_per_source_cap(n_clips, target_clips,
+                                                                len(library["clips"]), per_source),
+                                        clip_seconds=clip_seconds, title=title)
             if not segments:
                 library["errors"].append("%s: no reusable highlight found" % title)
                 continue
@@ -742,7 +771,9 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
             if progress:
                 progress("Picking highlights from %s" % title)
             segments = suggest_segments(client, model, "", duration,
-                                        n_clips=n_clips, clip_seconds=clip_seconds)
+                                        n_clips=_per_source_cap(n_clips, target_clips,
+                                                                len(library["clips"]), per_source),
+                                        clip_seconds=clip_seconds)
             if not segments:
                 library["errors"].append("%s: no reusable highlight found" % title)
                 continue

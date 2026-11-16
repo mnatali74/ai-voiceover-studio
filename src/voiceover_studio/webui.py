@@ -381,11 +381,16 @@ def clip_search(prompt: str, model: str, sources: int, queries: str, cookies: st
 
 
 def clip_build(picks: List[str], manual_urls: str, model: str, all_clips: bool, n_clips: int,
-               clip_seconds: float, stills: bool, delay: float, session: Dict[str, Any]
+               clip_seconds: float, stills: bool, delay: float, video_duration: float,
+               session: Dict[str, Any]
                ) -> Tuple[str, List[str], List[Tuple[str, str]], List[List[Any]], Any]:
-    """Selected (or manually pasted) YouTube URLs -> audio-free, classified clip library."""
+    """Selected (or manually pasted) source URLs -> audio-free, classified clip library.
+
+    The final video duration drives the estimate: how many shots (clips) and
+    sources are needed, and the batch stops as soon as enough clips are cut.
+    """
     from .ai_video import OpenRouterClient, best_value_models
-    from .clips import build_library
+    from .clips import build_library, estimate_needs
     labels = session.get("clip_labels") or {}
     links = [labels[p] for p in (picks or []) if p in labels]
     links += [u for u in (manual_urls or "").split() if u.startswith("http")]
@@ -396,16 +401,23 @@ def clip_build(picks: List[str], manual_urls: str, model: str, all_clips: bool, 
             urls.append(link)
     if not urls:
         raise ValueError("Select at least one video source (or paste a link manually).")
+    shots, sources_needed = estimate_needs(float(video_duration), float(clip_seconds))
+    target_clips = int(shots * 1.5)
     client = OpenRouterClient()
     if model in ("", "best value (auto)"):
         model = best_value_models(client)[0]
     workdir = Path(session["dir"])
-    status_lines = ["Working with model **%s**..." % model]
+    status_lines = ["Target: a **%d s** video → **%d** shots of ~%d s → up to **%d** clips from "
+                    "**%d** source(s); the batch stops as soon as enough clips are cut."
+                    % (int(video_duration), shots, int(clip_seconds), target_clips,
+                       sources_needed),
+                    "Working with model **%s**..." % model]
     library = build_library(urls, workdir, client, model,
                             n_clips=None if all_clips else int(n_clips),
                             clip_seconds=float(clip_seconds), stills=bool(stills),
                             delay=float(delay), cookies=session.get("cookies", ""),
                             titles=session.get("clip_titles") or {},
+                            target_clips=target_clips,
                             progress=lambda msg: status_lines.append("- %s" % msg))
     session["library"] = library
     picks_all = library["clips"] + library["frames"]
@@ -436,11 +448,12 @@ def clip_catalog_rows(session: Dict[str, Any]) -> List[List[Any]]:
             for entry in load_catalog(Path(session["dir"]))]
 
 
-def clip_select(prompt: str, model: str, language: str, session: Dict[str, Any]
+def clip_select(prompt: str, model: str, language: str, video_duration: float,
+                clip_seconds: float, session: Dict[str, Any]
                 ) -> Tuple[str, str, List[List[Any]]]:
     """Prompt + clip catalog -> the model picks the best clips and writes the script."""
     from .ai_video import OpenRouterClient, best_value_models
-    from .clips import build_video_script, load_catalog, select_clips
+    from .clips import build_video_script, estimate_needs, load_catalog, select_clips
     catalog = load_catalog(Path(session["dir"]))
     if not catalog:
         raise ValueError("The clip library is empty: download some clips first.")
@@ -448,7 +461,8 @@ def clip_select(prompt: str, model: str, language: str, session: Dict[str, Any]
     if model in ("", "best value (auto)"):
         model = best_value_models(client)[0]
     lang = "the same language as the prompt" if language in ("", "auto") else language
-    selected = select_clips(client, model, prompt, catalog, language=lang)
+    shots, _ = estimate_needs(float(video_duration), float(clip_seconds))
+    selected = select_clips(client, model, prompt, catalog, language=lang, max_shots=shots)
     script = build_video_script(selected, title=prompt[:60])
     session["selected_clips"] = [item["entry"]["id"] for item in selected]
     rows = [[item["entry"]["id"], item["entry"].get("description", "")[:120], item["narration"]]
@@ -651,6 +665,10 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
             clip_prompt = gr.Textbox(label="Prompt of the video to build", lines=2,
                                      placeholder="Es.: video promozionale sull'enoturismo nelle "
                                                  "Marche, stile documentaristico")
+            clip_duration = gr.Slider(15, 300, value=60, step=5,
+                                      label="Final video duration (s) — estimates how many clips "
+                                            "and sources are needed, and stops the batch when "
+                                            "enough are collected")
             with gr.Row():
                 clip_model = gr.Dropdown(choices=["best value (auto)"] + DEFAULT_MODELS,
                                          value="best value (auto)", allow_custom_value=True,
@@ -733,12 +751,13 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                               clip_pick])
             clip_button.click(clip_build,
                               inputs=[clip_pick, clip_manual, clip_model, clip_all, clip_n,
-                                      clip_len, clip_stills, clip_delay, session],
+                                      clip_len, clip_stills, clip_delay, clip_duration, session],
                               outputs=[clip_status, clip_files, clip_frames, clip_catalog,
                                        library_pick])
             clip_voices_button.click(voice_choices, inputs=[provider], outputs=[clip_voice])
             clip_select_button.click(clip_select,
-                                     inputs=[clip_prompt, clip_model, clip_language, session],
+                                     inputs=[clip_prompt, clip_model, clip_language,
+                                             clip_duration, clip_len, session],
                                      outputs=[clip_select_status, clip_script, clip_selected])
             clip_render_button.click(clip_render,
                                      inputs=[clip_script, provider, clip_language, speed,

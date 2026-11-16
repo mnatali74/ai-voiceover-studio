@@ -614,6 +614,77 @@ def test_fallback_segments_respect_clip_seconds():
     assert all(seg["end"] - seg["start"] <= 10.0 for seg in segments)
 
 
+def test_estimate_needs_scales_with_duration():
+    from voiceover_studio.clips import estimate_needs
+    assert estimate_needs(60, 10) == (6, 2)
+    assert estimate_needs(30, 10)[0] >= 3
+    assert estimate_needs(300, 10) == (30, 10)
+
+
+def test_build_library_stops_when_target_reached(fake, monkeypatch, tmp_path):
+    from voiceover_studio import clips
+    source = tmp_path / "sources" / "abc.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"video")
+    downloads, statuses = [], []
+    monkeypatch.setattr(clips, "fetch_info",
+                        lambda url, cookies=None: {"id": url[-3:], "title": "Video " + url[-3:],
+                                                   "duration": 300.0})
+
+    def fake_download(url, dest, cookies=None, ranges=None, audio=False):
+        downloads.append(url)
+        return source, {}
+
+    monkeypatch.setattr(clips, "download_video", fake_download)
+    monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "[00:05] x")
+    monkeypatch.setattr(clips, "cut_clip", lambda src, start, end, dest, audio=False: dest)
+    monkeypatch.setattr(clips, "extract_frames", lambda src, dest, every=3.0: [])
+    monkeypatch.setattr(clips, "classify_clip",
+                        lambda client, model, path, title, context: {"description": "x", "tags": []})
+    client = chat_client(fake, '[{"start": 5, "end": 15, "title": "A", "reason": "r"}, '
+                               '{"start": 20, "end": 30, "title": "B", "reason": "r"}, '
+                               '{"start": 40, "end": 50, "title": "C", "reason": "r"}, '
+                               '{"start": 60, "end": 70, "title": "D", "reason": "r"}]')
+    library = build_library(["https://youtu.be/abc", "https://youtu.be/def",
+                             "https://youtu.be/ghi"], tmp_path, client, "m",
+                            n_clips=None, clip_seconds=10.0, stills=False, delay=0.0,
+                            target_clips=2, per_source=2,
+                            progress=statuses.append)
+    assert len(library["clips"]) == 2
+    assert len(downloads) == 1
+    assert any("Enough clips collected (2/2)" in status for status in statuses)
+
+
+def test_build_library_per_source_cap_fills_target(fake, monkeypatch, tmp_path):
+    from voiceover_studio import clips
+    source = tmp_path / "sources" / "abc.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"video")
+    downloads = []
+    monkeypatch.setattr(clips, "fetch_info",
+                        lambda url, cookies=None: {"id": url[-3:], "title": "Video " + url[-3:],
+                                                   "duration": 300.0})
+
+    def fake_download(url, dest, cookies=None, ranges=None, audio=False):
+        downloads.append(url)
+        return source, {}
+
+    monkeypatch.setattr(clips, "download_video", fake_download)
+    monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "[00:05] x")
+    monkeypatch.setattr(clips, "cut_clip", lambda src, start, end, dest, audio=False: dest)
+    monkeypatch.setattr(clips, "extract_frames", lambda src, dest, every=3.0: [])
+    monkeypatch.setattr(clips, "classify_clip",
+                        lambda client, model, path, title, context: {"description": "x", "tags": []})
+    client = chat_client(fake, '[{"start": 5, "end": 15, "title": "A", "reason": "r"}, '
+                               '{"start": 20, "end": 30, "title": "B", "reason": "r"}, '
+                               '{"start": 40, "end": 50, "title": "C", "reason": "r"}]')
+    library = build_library(["https://youtu.be/abc", "https://youtu.be/def"], tmp_path,
+                            client, "m", n_clips=None, clip_seconds=10.0, stills=False,
+                            delay=0.0, target_clips=3, per_source=2)
+    assert len(library["clips"]) == 3 and len(downloads) == 2
+    assert len(library["catalog"]) == 3
+
+
 def test_cookie_opts_from_argument_and_env(monkeypatch):
     from voiceover_studio.clips import _cookie_opts
     monkeypatch.delenv("VOICEOVER_YTDLP_COOKIES", raising=False)

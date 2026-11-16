@@ -23,6 +23,11 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **Target duration drives the Clip studio**: a new field asks for the final video duration at
+  the start; from it the studio estimates how many shots, clips and sources are needed, caps the
+  clips extracted per source, and **stops the batch as soon as enough clips are cut** — no more
+  videos are downloaded than the target requires. The final selection picks as many shots as the
+  duration implies.
 - **Stock-footage sources with real descriptions in the Clip studio**: the search now runs on
   selectable sources — YouTube, **Wikimedia Commons** (keyless, richly described videos,
   downloaded directly over HTTPS: no cookies, no bot checks, no rate limits) and **Pixabay**

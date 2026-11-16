@@ -224,6 +224,7 @@ def test_clip_build_uses_selected_sources(tmp_path, monkeypatch):
         assert urls == ["https://youtu.be/abc", "https://youtu.be/xyz"]
         assert kwargs.get("keep_audio", False) is False
         assert kwargs["n_clips"] is None and kwargs["delay"] == 5.0
+        assert kwargs["target_clips"] == 9
         catalog = [{"id": "c_01", "source_title": "Vineyards",
                     "clip_path": str(workdir / "clip_library" / "clips" / "c_01.mp4"),
                     "description": "Green hills", "tags": ["hills"]}]
@@ -239,7 +240,8 @@ def test_clip_build_uses_selected_sources(tmp_path, monkeypatch):
     session["clip_labels"] = {"Aerial hills — C (5:00)": "https://youtu.be/abc"}
     status, clip_files, frames, catalog_rows, update = clip_build(
         ["Aerial hills — C (5:00)"], "https://youtu.be/xyz", "some/model", True, 2,
-        10, True, 5.0, session)
+        10, True, 5.0, 60, session)
+    assert "Target: a **60 s** video → **6** shots" in status
     assert "audio-free clips and **1** frames" in status and "Catalog: **1** entries" in status
     assert "Drone shot" in status
     assert clip_files[0].endswith("c_01.mp4")
@@ -252,8 +254,9 @@ def test_clip_select_builds_script(tmp_path, monkeypatch):
     import voiceover_studio.clips as clips
     from voiceover_studio.webui import clip_select
 
-    def fake_select(client, model, prompt, catalog, language="the user's language"):
-        assert language == "italian"
+    def fake_select(client, model, prompt, catalog, language="the user's language",
+                    max_shots=8):
+        assert language == "italian" and max_shots == 6
         return [{"entry": catalog[0], "narration": "Colline infinite."}]
 
     monkeypatch.setattr(clips, "select_clips", fake_select)
@@ -261,7 +264,7 @@ def test_clip_select_builds_script(tmp_path, monkeypatch):
     session = new_session(tmp_path)
     clips.save_catalog(session["dir"], [{"id": "c_01", "description": "hills",
                                          "tags": ["hills"], "clip_path": "/tmp/c_01.mp4"}])
-    status, script, rows = clip_select("enoturismo", "some/model", "italian", session)
+    status, script, rows = clip_select("enoturismo", "some/model", "italian", 60, 10, session)
     assert "Selected **1** clips" in status
     assert "![](/tmp/c_01.mp4)" in script and "Colline infinite." in script
     assert rows[0][2] == "Colline infinite."
