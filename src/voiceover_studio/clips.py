@@ -2,7 +2,8 @@
 
 The pipeline behind the *Clip studio* tab:
 
-    download_video()    yt-dlp fetches the source video (up to 1080p, mp4)
+    fetch_info()        yt-dlp reads title/duration without downloading media
+    download_video()    yt-dlp fetches only the needed sections (<=720p, mp4)
     fetch_transcript()  manual or automatic subtitles as "[mm:ss] text" lines
     suggest_segments()  an OpenRouter model picks self-contained highlight windows
     cut_clip()          ffmpeg stream-copies each segment into a reusable mp4
@@ -27,6 +28,10 @@ from .errors import ConfigError, ProviderError
 USER_AGENT = "ai-voiceover-studio (+https://github.com/yanghhu/ai-voiceover-studio)"
 SUBTITLE_LANGS = ("it", "en", "es", "fr", "de", "pt")
 MAX_TRANSCRIPT_CHARS = 12000
+MAX_SOURCE_SECONDS = 1800
+MIN_SOURCE_SECONDS = 30
+MAX_SOURCE_BYTES = 600 * 1024 * 1024
+
 
 CLIP_SYSTEM = (
     "You pick the most reusable highlight segments from a video transcript. Respond with ONLY "
@@ -139,11 +144,14 @@ def search_youtube(query: str, limit: int = 4,
     for entry in data.get("entries") or []:
         vid = entry.get("id") or entry.get("url", "")
         title = str(entry.get("title") or "")
+        duration = float(entry.get("duration") or 0)
         if not vid or not title_avoids_people(title):
+            continue
+        if duration and (duration > MAX_SOURCE_SECONDS or duration < MIN_SOURCE_SECONDS):
             continue
         results.append({"id": vid, "title": title,
                         "channel": str(entry.get("channel") or entry.get("uploader") or ""),
-                        "duration": float(entry.get("duration") or 0),
+                        "duration": duration,
                         "url": entry.get("url") or "https://www.youtube.com/watch?v=%s" % vid})
     return results
 
@@ -176,16 +184,46 @@ def _mmss(seconds: float) -> str:
     return "%02d:%02d" % (seconds // 60, seconds % 60)
 
 
-def download_video(url: str, dest_dir: Path,
-                   cookies: Optional[str] = None) -> Tuple[Path, Dict[str, Any]]:
-    """Download one YouTube URL (<=1080p mp4). Returns (path, info dict)."""
+def _range_offsets(ranges: List[Tuple[float, float]]) -> List[float]:
+    """Start offset of every range inside the concatenated partial download."""
+    offsets, acc = [], 0.0
+    for start, end in ranges:
+        offsets.append(acc)
+        acc += max(0.5, end - start)
+    return offsets
+
+
+def _is_disk_full(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "no space left" in text or "errno 28" in text
+
+
+def download_video(url: str, dest_dir: Path, cookies: Optional[str] = None,
+                   ranges: Optional[List[Tuple[float, float]]] = None,
+                   audio: bool = False) -> Tuple[Path, Dict[str, Any]]:
+    """Download one YouTube URL as a small (<=720p) mp4.
+
+    With ``ranges`` (a ``[(start, end), ...]`` list in seconds) only those
+    sections are fetched and concatenated, so a 30-minute source costs a few
+    megabytes instead of gigabytes. With ``audio=False`` (the default) only the
+    video stream is downloaded: the clips are B-roll and the final video gets
+    its own voiceover. Returns (path, info dict).
+    """
     yt_dlp = _import_yt_dlp()
     dest_dir.mkdir(parents=True, exist_ok=True)
-    opts = {"format": ("bv*[height<=1080][ext=mp4]+ba[ext=m4a]/"
-                       "b[height<=1080][ext=mp4]/bv*+ba/b"),
-            "outtmpl": str(dest_dir / "%(id)s.%(ext)s"),
-            "merge_output_format": "mp4", "noplaylist": True,
-            "quiet": True, "no_warnings": True, **_cookie_opts(cookies)}
+    fmt = ("bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/bv*+ba/b"
+           if audio else
+           "bv*[height<=720][ext=mp4]/bv*[height<=720]/"
+           "b[height<=720][ext=mp4]/b[height<=720]/b")
+    opts: Dict[str, Any] = {"format": fmt,
+                            "outtmpl": str(dest_dir / "%(id)s.%(ext)s"),
+                            "merge_output_format": "mp4", "noplaylist": True,
+                            "max_filesize": MAX_SOURCE_BYTES,
+                            "quiet": True, "no_warnings": True, **_cookie_opts(cookies)}
+    if ranges:
+        opts["download_ranges"] = (lambda info, ydl:
+                                   [{"start": start, "end": end} for start, end in ranges])
+        opts["force_keyframes_at_cuts"] = True
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True) or {}
         filepath = ((info.get("requested_downloads") or [{}])[0].get("filepath")
@@ -241,8 +279,11 @@ def fetch_transcript(url: str, dest_dir: Path, cookies: Optional[str] = None) ->
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.extract_info(url, download=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        message = str(exc)
+        if "429" in message or "Too Many Requests" in message:
+            raise ProviderError("YouTube rate limit (429) on the subtitles of %s: wait a few "
+                                "minutes, raise the pause slider, then retry." % url) from None
     def lang_rank(path: Path) -> int:
         lang = path.name.split(".")[-2]
         return SUBTITLE_LANGS.index(lang) if lang in SUBTITLE_LANGS else 99
@@ -484,20 +525,41 @@ def build_video_script(selected: List[Dict[str, Any]], title: str = "") -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def fetch_info(url: str, cookies: Optional[str] = None) -> Dict[str, Any]:
+    """Read title/duration metadata without downloading any media."""
+    yt_dlp = _import_yt_dlp()
+    opts = {"noplaylist": True, "skip_download": True,
+            "quiet": True, "no_warnings": True, **_cookie_opts(cookies)}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(url, download=False) or {}
+
+
+def _disk_full_message() -> str:
+    return ("No space left on disk. Free some space (check `df -h ~`, remove old sessions "
+            "under studio_out/ and the files in clip_library/sources/) and retry.")
+
+
 def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
                   n_clips: Optional[int] = 3, clip_seconds: float = 10.0, stills: bool = True,
                   frame_every: float = 3.0, keep_audio: bool = False,
-                  cookies: Optional[str] = None, delay: float = 5.0,
+                  cookies: Optional[str] = None, delay: float = 10.0,
+                  keep_sources: bool = False,
                   sleep: Callable[[float], None] = time.sleep,
                   progress: Optional[Callable[[str], None]] = None) -> Dict[str, List[Any]]:
-    """Process every URL: download, pick highlights, cut clips, extract stills, classify.
+    """Process every URL: read metadata, pick highlights, download, cut, classify.
 
-    Waits ``delay`` seconds between YouTube requests to stay under the radar, and
-    appends every classified clip to the JSON catalog on disk (incrementally, so a
-    crash never loses what was already processed). A URL that fails (removed video,
-    bot check, network) is reported in ``library["errors"]`` and the remaining URLs
-    are still processed. Returns ``{"clips", "frames", "segments", "sources",
-    "errors", "catalog"}`` under ``workdir/clip_library``.
+    Only the metadata is fetched first; after the model picks the highlight
+    windows, yt-dlp downloads **just those sections** (a few MB per source
+    instead of whole gigabytes), so small disks are safe. If the partial
+    download fails, the full video (capped at 720p and 600 MB) is used as a
+    fallback. The source file is deleted once its clips are cut unless
+    ``keep_sources`` is set. Waits ``delay`` seconds between YouTube requests
+    to stay under the rate limits, appends every classified clip to the JSON
+    catalog on disk (incrementally, so a crash never loses what was already
+    processed), and reports failures per URL, per clip and on a full disk in
+    ``library["errors"]`` without losing the rest. Returns ``{"clips",
+    "frames", "segments", "sources", "errors", "catalog"}`` under
+    ``workdir/clip_library``.
     """
     workdir = Path(workdir)
     lib_dir = workdir / "clip_library"
@@ -511,50 +573,99 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
             continue
         if not first and delay > 0:
             if progress:
-                progress("Waiting %.0f s before the next download (rate limit)" % delay)
+                progress("Waiting %.0f s before the next video (rate limit)" % delay)
             sleep(delay)
         first = False
         if progress:
-            progress("Downloading %s" % url)
+            progress("Reading video info for %s" % url)
         try:
-            path, info = download_video(url, lib_dir / "sources", cookies=cookies)
+            info = fetch_info(url, cookies=cookies)
         except Exception as exc:
             library["errors"].append(_download_hint(url, exc))
             continue
-        title = str(info.get("title") or path.stem)
-        duration = float(info.get("duration") or probe_duration(path) or 0.0)
+        title = str(info.get("title") or url)
+        duration = float(info.get("duration") or 0.0)
+        if duration and duration > MAX_SOURCE_SECONDS:
+            library["errors"].append("%s: skipped, %.0f min exceeds the %d-minute source limit"
+                                     % (title, duration / 60.0, MAX_SOURCE_SECONDS // 60))
+            continue
         if progress:
             progress("Fetching subtitles for %s" % title)
         if delay > 0:
-            sleep(min(delay, 3.0))
-        transcript = fetch_transcript(url, lib_dir / "sources", cookies=cookies)
+            sleep(delay)
+        try:
+            transcript = fetch_transcript(url, lib_dir / "sources", cookies=cookies)
+        except ProviderError as exc:
+            library["errors"].append(str(exc))
+            continue
         if progress:
             progress("Picking highlights from %s" % title)
         segments = suggest_segments(client, model, transcript, duration,
                                     n_clips=n_clips, clip_seconds=clip_seconds, title=title)
-        stem = _slug(title)
-        for j, seg in enumerate(segments, 1):
-            clip_path = cut_clip(path, seg["start"], seg["end"],
-                                 lib_dir / "clips" / ("%s_%02d.mp4" % (stem, j)),
-                                 audio=keep_audio)
-            library["clips"].append(str(clip_path))
-            library["segments"].append({"source": title, **seg})
-            frames: List[Path] = []
-            if stills:
-                if progress:
-                    progress("Extracting frames from %s (%d/%d)" % (seg["title"], j, len(segments)))
-                frames = extract_frames(clip_path, lib_dir / "frames" / ("%s_%02d" % (stem, j)),
-                                        every=frame_every)
-                library["frames"].extend(str(frame) for frame in frames)
+        if not segments:
+            library["errors"].append("%s: no reusable highlight found" % title)
+            continue
+        ranges = [(seg["start"], seg["end"]) for seg in segments]
+        path, offsets, partial = None, None, False
+        try:
+            path, info = download_video(url, lib_dir / "sources", cookies=cookies,
+                                        ranges=ranges, audio=keep_audio)
+            offsets = _range_offsets(ranges)
+            partial = True
+        except Exception as exc:
+            if _is_disk_full(exc):
+                library["errors"].append(_disk_full_message())
+                break
             if progress:
-                progress("Classifying %s (%d/%d)" % (seg["title"], j, len(segments)))
+                progress("Partial download failed (%s); falling back to the full video"
+                         % str(exc)[:120])
+        if path is None:
             try:
-                details = classify_clip(client, model, clip_path, title,
-                                        _transcript_excerpt(transcript, seg["start"], seg["end"]))
-            except (ProviderError, ConfigError, ConnectionError) as exc:
-                details = {"description": "classification failed: %s" % str(exc)[:150],
-                           "tags": [], "mood": "", "setting": "", "camera": "",
-                           "has_people": None, "usable": True}
+                path, info = download_video(url, lib_dir / "sources", cookies=cookies,
+                                            audio=keep_audio)
+            except Exception as exc:
+                if _is_disk_full(exc):
+                    library["errors"].append(_disk_full_message())
+                    break
+                library["errors"].append(_download_hint(url, exc))
+                continue
+        stem = _slug(title)
+        aborted = False
+        for j, seg in enumerate(segments, 1):
+            start, end = seg["start"], seg["end"]
+            if partial and offsets is not None:
+                start = offsets[j - 1]
+                end = start + (seg["end"] - seg["start"])
+            clip_path = lib_dir / "clips" / ("%s_%02d.mp4" % (stem, j))
+            frames: List[Path] = []
+            try:
+                cut_clip(path, start, end, clip_path, audio=keep_audio)
+                library["clips"].append(str(clip_path))
+                library["segments"].append({"source": title, **seg})
+                if stills:
+                    if progress:
+                        progress("Extracting frames from %s (%d/%d)"
+                                 % (seg["title"], j, len(segments)))
+                    frames = extract_frames(clip_path, lib_dir / "frames" / ("%s_%02d" % (stem, j)),
+                                            every=frame_every)
+                    library["frames"].extend(str(frame) for frame in frames)
+                if progress:
+                    progress("Classifying %s (%d/%d)" % (seg["title"], j, len(segments)))
+                try:
+                    details = classify_clip(client, model, clip_path, title,
+                                            _transcript_excerpt(transcript, seg["start"], seg["end"]))
+                except (ProviderError, ConfigError, ConnectionError) as exc:
+                    details = {"description": "classification failed: %s" % str(exc)[:150],
+                               "tags": [], "mood": "", "setting": "", "camera": "",
+                               "has_people": None, "usable": True}
+            except Exception as exc:
+                if _is_disk_full(exc):
+                    library["errors"].append(_disk_full_message())
+                    aborted = True
+                    break
+                library["errors"].append("clip %s (%s) failed: %s"
+                                         % (clip_path.name, seg["title"], str(exc)[:200]))
+                continue
             entry = {"id": "%s_%02d" % (stem, j), "source_url": url, "source_title": title,
                      "clip_path": str(clip_path), "start": seg["start"], "end": seg["end"],
                      "segment_title": seg["title"], "frames": [str(f) for f in frames],
@@ -562,5 +673,12 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
             catalog.append(entry)
             library["catalog"] = catalog
             save_catalog(workdir, catalog)
+        if not keep_sources and path is not None and path.is_file():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        if aborted:
+            break
         library["sources"].append(title)
     return library

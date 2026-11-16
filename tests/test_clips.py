@@ -118,12 +118,13 @@ def test_build_library_cuts_suggested_segments(fake, monkeypatch, tmp_path):
     source = tmp_path / "sources" / "abc.mp4"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"video")
+    monkeypatch.setattr(clips, "fetch_info",
+                        lambda url, cookies=None: {"id": "abc", "title": "Vineyards",
+                                                   "duration": 120.0})
     monkeypatch.setattr(clips, "download_video",
-                        lambda url, dest, cookies=None: (source, {"id": "abc",
-                                                                  "title": "Vineyards",
-                                                                  "duration": 120.0}))
+                        lambda url, dest, cookies=None, ranges=None, audio=False:
+                        (source, {"id": "abc"}))
     monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "[00:10] great shots")
-    monkeypatch.setattr(clips, "probe_duration", lambda path: 120.0)
     cut, frames = [], []
     monkeypatch.setattr(clips, "cut_clip",
                         lambda src, start, end, dest, audio=False:
@@ -135,7 +136,7 @@ def test_build_library_cuts_suggested_segments(fake, monkeypatch, tmp_path):
     library = build_library(["https://youtu.be/abc"], tmp_path, client, "m",
                             n_clips=2, clip_seconds=10.0, stills=True)
     assert len(library["clips"]) == 2 and library["clips"][0].endswith("vineyards_01.mp4")
-    assert cut[0] == (5.0, 15.0) and cut[1][1] == 120.0
+    assert cut[0] == (0.0, 10.0) and cut[1] == (10.0, 11.0)
     assert library["segments"][0]["source"] == "Vineyards"
     assert len(library["frames"]) == 4 and "frame_001.jpg" in library["frames"][0]
 
@@ -153,12 +154,15 @@ def test_build_library_continues_after_download_failure(fake, monkeypatch, tmp_p
     source.parent.mkdir(parents=True)
     source.write_bytes(b"video")
 
-    def fake_download(url, dest, cookies=None):
+    def fake_info(url, cookies=None):
         if "blocked" in url:
             raise ConfigError("Sign in to confirm you're not a bot")
-        return source, {"id": "ok", "title": "Good video", "duration": 60.0}
+        return {"id": "ok", "title": "Good video", "duration": 60.0}
 
-    monkeypatch.setattr(clips, "download_video", fake_download)
+    monkeypatch.setattr(clips, "fetch_info", fake_info)
+    monkeypatch.setattr(clips, "download_video",
+                        lambda url, dest, cookies=None, ranges=None, audio=False:
+                        (source, {"id": "ok"}))
     monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "")
     monkeypatch.setattr(clips, "cut_clip", lambda src, start, end, dest, audio=False: dest)
     monkeypatch.setattr(clips, "extract_frames", lambda src, dest, every=3.0: [])
@@ -169,6 +173,104 @@ def test_build_library_continues_after_download_failure(fake, monkeypatch, tmp_p
                             delay=0.0)
     assert len(library["clips"]) == 1 and library["sources"] == ["Good video"]
     assert "bot check" in library["errors"][0] and "cookies.txt" in library["errors"][0]
+
+
+def test_build_library_skips_overlong_sources(fake, monkeypatch, tmp_path):
+    from voiceover_studio import clips
+    downloads = []
+    monkeypatch.setattr(clips, "fetch_info",
+                        lambda url, cookies=None: {"id": "big", "title": "Huge video",
+                                                   "duration": 4000.0})
+    monkeypatch.setattr(clips, "download_video",
+                        lambda url, dest, cookies=None, ranges=None, audio=False:
+                        downloads.append(url) or (None, {}))
+    library = build_library(["https://youtu.be/big"], tmp_path, None, "m", delay=0.0)
+    assert downloads == []
+    assert "exceeds" in library["errors"][0] and "Huge video" in library["errors"][0]
+
+
+def test_build_library_deletes_source_unless_kept(fake, monkeypatch, tmp_path):
+    from voiceover_studio import clips
+    source = tmp_path / "sources" / "abc.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"video")
+    monkeypatch.setattr(clips, "fetch_info",
+                        lambda url, cookies=None: {"id": "abc", "title": "Vineyards",
+                                                   "duration": 60.0})
+    monkeypatch.setattr(clips, "download_video",
+                        lambda url, dest, cookies=None, ranges=None, audio=False: (source, {}))
+    monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "")
+    monkeypatch.setattr(clips, "cut_clip", lambda src, start, end, dest, audio=False: dest)
+    monkeypatch.setattr(clips, "extract_frames", lambda src, dest, every=3.0: [])
+    monkeypatch.setattr(clips, "classify_clip",
+                        lambda client, model, path, title, context: {"description": "x", "tags": []})
+    client = chat_client(fake, '[{"start": 5, "end": 15, "title": "A", "reason": "r"}]')
+    build_library(["https://youtu.be/abc"], tmp_path, client, "m", n_clips=1,
+                  clip_seconds=10.0, stills=False, delay=0.0)
+    assert not source.exists()
+    source.write_bytes(b"video")
+    build_library(["https://youtu.be/abc"], tmp_path, client, "m", n_clips=1,
+                  clip_seconds=10.0, stills=False, delay=0.0, keep_sources=True)
+    assert source.exists()
+
+
+def test_build_library_continues_after_clip_failure(fake, monkeypatch, tmp_path):
+    from voiceover_studio import clips
+    source = tmp_path / "sources" / "abc.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"video")
+    monkeypatch.setattr(clips, "fetch_info",
+                        lambda url, cookies=None: {"id": "abc", "title": "Vineyards",
+                                                   "duration": 120.0})
+    monkeypatch.setattr(clips, "download_video",
+                        lambda url, dest, cookies=None, ranges=None, audio=False: (source, {}))
+    monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "[00:05] vines")
+
+    def flaky_cut(src, start, end, dest, audio=False):
+        if start == 0.0:
+            raise ConfigError("ffmpeg failed: muxer exploded")
+        return dest
+
+    monkeypatch.setattr(clips, "cut_clip", flaky_cut)
+    monkeypatch.setattr(clips, "extract_frames", lambda src, dest, every=3.0: [])
+    monkeypatch.setattr(clips, "classify_clip",
+                        lambda client, model, path, title, context: {"description": "x", "tags": []})
+    client = chat_client(fake, '[{"start": 5, "end": 15, "title": "A", "reason": "r"}, '
+                               '{"start": 30, "end": 40, "title": "B", "reason": "r"}]')
+    library = build_library(["https://youtu.be/abc"], tmp_path, client, "m",
+                            n_clips=None, clip_seconds=10.0, stills=False, delay=0.0)
+    assert len(library["clips"]) == 1 and len(library["catalog"]) == 1
+    assert any("vineyards_01" in error for error in library["errors"])
+    assert not source.exists()
+
+
+def test_build_library_stops_on_disk_full(fake, monkeypatch, tmp_path):
+    from voiceover_studio import clips
+    downloads = []
+    source = tmp_path / "sources" / "abc.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"video")
+    monkeypatch.setattr(clips, "fetch_info",
+                        lambda url, cookies=None: {"id": "abc", "title": "Vineyards",
+                                                   "duration": 120.0})
+
+    def fake_download(url, dest, cookies=None, ranges=None, audio=False):
+        downloads.append(url)
+        return source, {}
+
+    monkeypatch.setattr(clips, "download_video", fake_download)
+    monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "[00:05] vines")
+
+    def full_cut(src, start, end, dest, audio=False):
+        raise Exception("ffmpeg failed: Error muxing a packet: No space left on device")
+
+    monkeypatch.setattr(clips, "cut_clip", full_cut)
+    client = chat_client(fake, '[{"start": 5, "end": 15, "title": "A", "reason": "r"}]')
+    library = build_library(["https://youtu.be/abc", "https://youtu.be/def"], tmp_path,
+                            client, "m", n_clips=1, clip_seconds=10.0, stills=False, delay=0.0)
+    assert len(downloads) == 1 and library["clips"] == []
+    assert any("No space left on disk" in error for error in library["errors"])
+    assert not source.exists()
 
 
 def test_title_avoids_people_filters_subjects():
@@ -215,6 +317,99 @@ def test_search_youtube_flat_and_filtered(monkeypatch):
     assert [r["id"] for r in results] == ["abc", "def"]
     assert results[1]["url"].endswith("watch?v=def")
     assert FakeYdl.opts["extract_flat"] is True
+
+
+class DurationYdl:
+    def __init__(self, opts):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def extract_info(self, url, download=False):
+        return {"entries": [
+            {"id": "long", "title": "Full documentary aerial", "duration": 5400,
+             "url": "https://youtu.be/long"},
+            {"id": "short", "title": "Quick aerial shot", "duration": 10,
+             "url": "https://youtu.be/short"},
+            {"id": "ok", "title": "Aerial coastline", "duration": 600,
+             "url": "https://youtu.be/ok"},
+            {"id": "unknown", "title": "Aerial mountains", "duration": None,
+             "url": "https://youtu.be/unknown"},
+        ]}
+
+
+def test_search_youtube_filters_duration(monkeypatch):
+    from voiceover_studio import clips
+    monkeypatch.setattr(clips, "_import_yt_dlp",
+                        lambda: type("M", (), {"YoutubeDL": DurationYdl}))
+    results = search_youtube("aerial", limit=4)
+    assert [r["id"] for r in results] == ["ok", "unknown"]
+
+
+class FakeDownloadYdl:
+    def __init__(self, opts):
+        FakeDownloadYdl.opts = opts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def extract_info(self, url, download=False):
+        return {"id": "abc", "title": "T"}
+
+    def prepare_filename(self, info):
+        return ""
+
+
+def test_download_video_ranges_and_light_format(monkeypatch, tmp_path):
+    from voiceover_studio import clips
+    dest = tmp_path / "sources"
+    dest.mkdir()
+    (dest / "abc.mp4").write_bytes(b"v")
+    monkeypatch.setattr(clips, "_import_yt_dlp",
+                        lambda: type("M", (), {"YoutubeDL": FakeDownloadYdl}))
+    path, info = clips.download_video("https://youtu.be/abc", dest,
+                                      ranges=[(5, 15), (30, 40)])
+    assert path.name == "abc.mp4"
+    assert FakeDownloadYdl.opts["force_keyframes_at_cuts"] is True
+    assert FakeDownloadYdl.opts["download_ranges"](None, None) == \
+        [{"start": 5, "end": 15}, {"start": 30, "end": 40}]
+    assert "height<=720" in FakeDownloadYdl.opts["format"]
+    assert "+ba" not in FakeDownloadYdl.opts["format"]
+    assert FakeDownloadYdl.opts["max_filesize"] == clips.MAX_SOURCE_BYTES
+    clips.download_video("https://youtu.be/abc", dest, audio=True)
+    assert "+ba" in FakeDownloadYdl.opts["format"]
+    assert "download_ranges" not in FakeDownloadYdl.opts
+
+
+def test_fetch_transcript_raises_on_rate_limit(monkeypatch, tmp_path):
+    from voiceover_studio import clips
+    from voiceover_studio.errors import ProviderError
+
+    class RateLimitedYdl:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=False):
+            raise Exception("Unable to download video subtitles for 'it': "
+                            "HTTP Error 429: Too Many Requests")
+
+    monkeypatch.setattr(clips, "_import_yt_dlp",
+                        lambda: type("M", (), {"YoutubeDL": RateLimitedYdl}))
+    with pytest.raises(ProviderError):
+        clips.fetch_transcript("https://youtu.be/abc", tmp_path)
 
 
 def test_find_sources_deduplicates_across_queries(fake, monkeypatch):
@@ -309,10 +504,12 @@ def test_build_library_classifies_and_saves_catalog(fake, monkeypatch, tmp_path)
     source = tmp_path / "sources" / "abc.mp4"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"video")
+    monkeypatch.setattr(clips, "fetch_info",
+                        lambda url, cookies=None: {"id": "abc", "title": "Vineyards",
+                                                   "duration": 120.0})
     monkeypatch.setattr(clips, "download_video",
-                        lambda url, dest, cookies=None: (source, {"id": "abc",
-                                                                  "title": "Vineyards",
-                                                                  "duration": 120.0}))
+                        lambda url, dest, cookies=None, ranges=None, audio=False:
+                        (source, {"id": "abc"}))
     monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "[00:05] rows of vines")
     monkeypatch.setattr(clips, "cut_clip", lambda src, start, end, dest, audio=False: dest)
     monkeypatch.setattr(clips, "extract_frames", lambda src, dest, every=3.0: [])
@@ -331,7 +528,7 @@ def test_build_library_classifies_and_saves_catalog(fake, monkeypatch, tmp_path)
     assert library["catalog"][0]["id"] == "vineyards_01"
     assert library["catalog"][0]["description"] == "Green hills"
     assert load_catalog(tmp_path)[1]["segment_title"] == "Rows"
-    assert sleeps == [3.0]  # pause between download and subtitle fetch, none between sources
+    assert sleeps == [7.0]  # pause before the subtitle fetch, none between sources
 
 
 def test_cookie_opts_from_argument_and_env(monkeypatch):

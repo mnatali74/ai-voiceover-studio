@@ -329,8 +329,9 @@ def clip_search(prompt: str, model: str, sources: int, cookies: str, session: Di
         session["clip_labels"][label] = c["url"]
     rows = [[i + 1, c["title"], c["channel"] or "?", c["query"]]
             for i, c in enumerate(candidates)]
-    status = ("**%d** searches, **%d** candidate videos (people-focused titles filtered out). "
-              "Watch the previews, then select the videos to download below.\n\n%s"
+    status = ("**%d** searches, **%d** candidate videos (people-focused titles, videos under "
+              "30 s and over 30 min filtered out). Watch the previews, then select the videos "
+              "to download below.\n\n%s"
               % (len(queries), len(candidates), "\n".join(status_lines)))
     return status, rows, _embed_html(candidates), gr.update(choices=labels, value=[])
 
@@ -364,7 +365,8 @@ def clip_build(picks: List[str], manual_urls: str, model: str, all_clips: bool, 
     session["library"] = library
     picks_all = library["clips"] + library["frames"]
     status = ("**%d** audio-free clips and **%d** frames from %d video(s), model **%s**. "
-              "Catalog: **%d** entries.\n\n%s"
+              "Catalog: **%d** entries. Source videos are deleted after cutting to save disk "
+              "space.\n\n%s"
               % (len(library["clips"]), len(library["frames"]), len(library["sources"]),
                  model, len(library["catalog"]), "\n".join(status_lines)))
     for error in library.get("errors", []):
@@ -626,8 +628,8 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                 clip_all = gr.Checkbox(value=True, label="Extract every highlight (recommended)")
                 clip_n = gr.Slider(1, 6, value=2, step=1, label="…or this many clips per video")
                 clip_len = gr.Slider(5, 30, value=10, step=1, label="Clip length (s)")
-                clip_delay = gr.Slider(0, 20, value=5, step=1,
-                                       label="Pause between downloads (s, anti-ban)")
+                clip_delay = gr.Slider(0, 30, value=10, step=1,
+                                       label="Pause between YouTube requests (s, rate-limit protection)")
             clip_stills = gr.Checkbox(value=True, label="Also extract still frames from the clips")
             clip_manual = gr.Textbox(label="Or paste YouTube links manually (optional)", lines=2,
                                      placeholder="https://www.youtube.com/watch?v=...")

@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **Clip studio disk safety**: sources are downloaded as small (<=720p) video-only files and,
+  once the model has picked the highlights, only those sections are fetched (yt-dlp
+  `download_ranges`), so a 30-minute source costs a few megabytes instead of gigabytes. The
+  source file is deleted after cutting, a failing clip no longer aborts the batch, a full disk
+  stops everything with a clear message, and search results skip videos longer than 30 minutes.
+  The pause between YouTube requests now defaults to 10 s and also covers subtitle fetches; a
+  429 on subtitles is reported instead of silently continuing.
 - **AI Video resilience**: a scene whose asset cannot be found no longer aborts the whole plan —
   it continues without a visual and renders as animated text, and the UI reports which scenes have
   no asset. Pollinations generation retries with fresh seeds and reports rate limiting clearly;

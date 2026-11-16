@@ -124,16 +124,20 @@ about, and the OpenRouter model turns the prompt into several varied YouTube sea
 five different sources, so no single video gets copied; people-focused titles like vlogs,
 tutorials and interviews are filtered out). You **preview the candidates inline without
 downloading** anything, tick the videos you like (or paste links manually), and the studio then
-downloads each source (spaced by a configurable pause to respect YouTube's rate limits), reads
-its subtitles, asks the model to pick **every** reusable highlight segment, and cuts them into
+reads each source's metadata and subtitles (spaced by a configurable pause to respect YouTube's
+rate limits), asks the model to pick **every** reusable highlight segment, and downloads **only
+those sections** of each video (<=720p, video-only: a 30-minute source costs a few megabytes,
+not gigabytes) before cutting them into
 standalone **audio-free** mp4 clips with meaningful still frames extracted. Every clip is then
 classified in detail by the model — description, tags, mood, setting, camera move, people check —
 and stored in a JSON catalog on disk (`clip_library/catalog.json`), your searchable B-roll
 database. From the video prompt and that catalog the model selects the best 3–8 shots, writes a
 spoken line for each, and the tab renders the final MP4 with the narrator voice you pick in the
 tab. The clips and frames also show up in the
-*Video* tab, where you tick exactly which ones to reuse as B-roll. A URL that fails
-is reported and the rest of the batch continues. When YouTube answers "Sign in to confirm you're
+*Video* tab, where you tick exactly which ones to reuse as B-roll. A URL, a single clip or a
+subtitle fetch that fails is reported and the rest of the batch continues; the source video is
+deleted once its clips are cut, and a full disk stops the batch with a clear message. When
+YouTube answers "Sign in to confirm you're
 not a bot", make sure a JavaScript runtime is installed — recent yt-dlp needs
 [deno](https://docs.deno.com/runtime/getting_started/installation/) (or Node) on the machine to
 solve YouTube's challenges — and export your browser cookies to a cookies.txt file and point the
