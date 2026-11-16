@@ -27,6 +27,12 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **Overlays: infographics on top of the video, not instead of it**: a new script syntax
+  `![](picture.png){overlay}` composites a transparent image over the shot's clip — it slides in,
+  drifts gently and can carry a real alpha channel (PNG with transparency). The *Add
+  illustrations* step in the Clip studio now generates overlays instead of standalone shots, so
+  the video keeps playing underneath. A **none** caption style in the Video, AI Video and Clip
+  studio tabs renders the video without captions.
 - **Video duration matches the narration reading time by default**: a new estimate of the
   reading time (words at a natural ~150 wpm pace plus the renderer's pauses) drives both the
   Clip studio and the AI Video tab. In the Clip studio a checkbox (on by default) makes the

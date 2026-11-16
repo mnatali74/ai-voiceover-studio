@@ -302,10 +302,11 @@ def test_clip_illustrate_inserts_generated_images(tmp_path, monkeypatch):
               "![](/tmp/c_02.mp4)\n\nVigne al tramonto.")
     status, out = clip_illustrate(script, "enoturismo nelle Marche", "2",
                                   "Infografica illustrata", "recraft/test", session)
-    assert "Added **1** illustrations" in status
+    assert "Added **1** overlays" in status
     assert out.count("illustration_01.png") == 1
-    assert out.index("illustration_01.png") > out.index("Vigne al tramonto.")
-    assert "illustration_01.png" not in out[:out.index("Vigne al tramonto.")]
+    assert "){overlay}" in out
+    assert out.index("illustration_01.png") < out.index("Vigne al tramonto.")
+    assert out.index("illustration_01.png") > out.index("c_02.mp4")
 
 
 def test_clip_illustrate_every_shot_and_failure_is_not_fatal(tmp_path, monkeypatch):
@@ -331,6 +332,7 @@ def test_clip_illustrate_every_shot_and_failure_is_not_fatal(tmp_path, monkeypat
     assert len(calls) == 3
     assert "Illustration 1 failed" in status
     assert "illustration_02.jpg" in out and "illustration_03.jpg" in out
+    assert out.count("){overlay}") == 2
 
 
 def test_clip_preview_uses_dummy_and_small_size(tmp_path, monkeypatch):

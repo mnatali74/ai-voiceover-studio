@@ -214,7 +214,8 @@ def render_video_clip(script: str, provider: str, language: str, speed: float,
         size = (1080, 1920) if vertical else (1920, 1080)
     result = render_video(studio, save_broll(broll, session, extra=library), script_path, out,
                           size=size,
-                          style="auto" if style == "auto" else style,
+                          style="clean" if style == "none" else ("auto" if style == "auto" else style),
+                          subtitles="none" if style == "none" else "burn",
                           music=music or None, voice_overrides=overrides,
                           default_voice=voice or None,
                           transition=float(transition), transition_style=transition_style)
@@ -555,10 +556,11 @@ def clip_preview(script_text: str, vertical: bool, session: Dict[str, Any]
 
 def clip_illustrate(script_text: str, prompt: str, every: int, style: str, image_model: str,
                     session: Dict[str, Any]) -> Tuple[str, str]:
-    """Presentation style: insert AI illustrations between the narration shots.
+    """Presentation style: AI illustrations as transparent overlays on the video shots.
 
-    Every N narration blocks get a generated `![](image)` line (Ken Burns turns it into
-    a moving infographic). The script stays editable; failures never abort the batch."""
+    Every N narration blocks get a `![](image){overlay}` line: the renderer composites the
+    picture on top of that shot's clip (slide-in + gentle drift), the video keeps playing
+    underneath. The script stays editable; failures never abort the batch."""
     from .ai_video import ILLUSTRATION_MODELS, OpenRouterClient, generate_illustration
     text = (script_text or "").strip()
     if not text:
@@ -570,27 +572,29 @@ def clip_illustrate(script_text: str, prompt: str, every: int, style: str, image
     workdir.mkdir(parents=True, exist_ok=True)
     out, notes, added, narrated = [], [], 0, 0
     for line in text.splitlines():
-        out.append(line)
         stripped = line.strip()
         if not stripped or stripped.startswith("![") or stripped.startswith("#"):
+            out.append(line)
             continue
         narrated += 1
-        if narrated % every:
-            continue
-        added += 1
-        context = "%s Context of the video: %s" % (stripped, (prompt or "").strip()[:200])
-        try:
-            path = generate_illustration(client, context, workdir / ("illustration_%02d" % added),
-                                         model=model, style=style)
-        except (ProviderError, ConnectionError) as exc:
-            notes.append("Illustration %d failed: %s" % (added, str(exc)[:140]))
-            continue
-        out += ["", "![](%s)" % path, ""]
+        if narrated % every == 0:
+            added += 1
+            context = "%s Context of the video: %s" % (stripped, (prompt or "").strip()[:200])
+            try:
+                path = generate_illustration(client, context, workdir / ("illustration_%02d" % added),
+                                             model=model, style=style)
+            except (ProviderError, ConnectionError) as exc:
+                notes.append("Illustration %d failed: %s" % (added, str(exc)[:140]))
+                path = None
+            if path is not None:
+                out.append("![](%s){overlay}" % path)
+        out.append(line)
     if not added:
         raise ValueError("No narration shot found to illustrate.")
-    status = ("Added **%d** illustrations (model **%s**, style **%s**) after every %d "
-              "narration shot(s). The script above is editable — run the quick preview to "
-              "check it." % (added - len(notes), model, style or "none", every))
+    status = ("Added **%d** overlays (model **%s**, style **%s**): transparent infographics "
+              "floating over the clips, one every %d narration shot(s). The video keeps playing "
+              "underneath — run the quick preview to check it."
+              % (added - len(notes), model, style or "none", every))
     for note in notes:
         status += "\n\n⚠️ %s" % note
     return status, "\n".join(out).strip() + "\n"
@@ -684,8 +688,9 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                         "[ffmpeg](https://ffmpeg.org) on the machine running the studio.")
             with gr.Row():
                 video_vertical = gr.Checkbox(value=False, label="Vertical 9:16 (Shorts / TikTok)")
-                video_style = gr.Dropdown(choices=["auto", "tiktok", "bold", "clean", "minimal", "box"],
-                                          value="auto", label="Caption style")
+                video_style = gr.Dropdown(choices=["auto", "tiktok", "bold", "clean", "minimal",
+                                                  "box", "none"],
+                                          value="auto", label="Caption style ('none' = no captions)")
                 video_music = gr.Dropdown(choices=["", "ambient", "pulse"], value="",
                                           label="Background music")
             broll = gr.File(label="B-roll images or video clips (optional, used in upload order "
@@ -741,8 +746,9 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
             ai_script = gr.Textbox(label="Generated script (editable)", lines=10)
             with gr.Row():
                 ai_vertical = gr.Checkbox(value=False, label="Vertical 9:16")
-                ai_style = gr.Dropdown(choices=["auto", "tiktok", "bold", "clean", "minimal", "box"],
-                                       value="auto", label="Caption style")
+                ai_style = gr.Dropdown(choices=["auto", "tiktok", "bold", "clean", "minimal",
+                                                "box", "none"],
+                                       value="auto", label="Caption style ('none' = no captions)")
                 ai_music = gr.Dropdown(choices=["", "ambient", "pulse"], value="ambient",
                                        label="Background music")
             ai_render_button = gr.Button("Render video from this script", variant="primary")
@@ -842,7 +848,8 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
             with gr.Row():
                 clip_vertical = gr.Checkbox(value=False, label="Vertical 9:16")
                 clip_style = gr.Dropdown(choices=["auto", "tiktok", "bold", "clean", "minimal",
-                                                  "box"], value="auto", label="Caption style")
+                                                  "box", "none"], value="auto",
+                                         label="Caption style ('none' = no captions)")
                 clip_music = gr.Dropdown(choices=["", "ambient", "pulse"], value="ambient",
                                          label="Background music")
             clip_auto_duration = gr.Checkbox(
