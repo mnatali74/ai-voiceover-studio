@@ -52,6 +52,29 @@ VERIFY_PROMPT = (
     'Answer with ONLY a JSON object: {{"match": true or false, "reason": "short reason"}}'
 )
 
+ILLUSTRATION_MODELS = [
+    "recraft/recraft-v4.1-flash-v2",
+    "black-forest-labs/flux-3-image-klein",
+    "openai/gpt-image-2",
+    "qwen/qwen-image-3",
+]
+
+ILLUSTRATION_STYLES = {
+    "": "",
+    "Infografica illustrata": "Illustrazione didattica in stile infografica, colori chiari, "
+                             "forme semplici e leggibili, sfondo bianco. ",
+    "Vettoriale piatto": "Illustrazione vettoriale piatta, colori pieni, forme geometriche "
+                         "semplici, nessuna sfumatura, sfondo chiaro. ",
+    "Schema botanico": "Tavola illustrata in stile manuale botanico, linee sottili precise, "
+                       "colori naturali tenui, sfondo color carta antica. ",
+    "Acquerello": "Illustrazione ad acquerello morbido, colori che sfumano, texture della "
+                  "carta, sfondo bianco. ",
+    "Fumetto": "Illustrazione in stile fumetto, contorni neri decisi, colori piatti con "
+               "ombreggiature semplici. ",
+    "Schizzo a colori": "Illustrazione in stile schizzo a colori, linee a matita visibili, "
+                        "colori tenui, sfondo chiaro. ",
+}
+
 
 @dataclass
 class Scene:
@@ -98,6 +121,17 @@ class OpenRouterClient:
             return data["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as exc:
             raise ProviderError("Unexpected OpenRouter response shape: %s" % exc) from None
+
+    def image(self, model: str, prompt: str, aspect_ratio: Optional[str] = None) -> List[str]:
+        """Image generation: returns the image URLs (data: or https:) of the answer."""
+        body: Dict[str, Any] = {"model": model, "modalities": ["image"],
+                                "messages": [{"role": "user", "content": prompt}]}
+        if aspect_ratio:
+            body["image_config"] = {"aspect_ratio": aspect_ratio}
+        data = self.request("POST", "/chat/completions", body)
+        message = (data.get("choices") or [{}])[0].get("message", {})
+        return [img.get("image_url", {}).get("url", "")
+                for img in message.get("images", []) if img.get("image_url")]
 
     def models(self) -> List[str]:
         data = self.request("GET", "/models")
@@ -287,6 +321,54 @@ def generate_asset(query: str, orientation: str, workdir: Path, index: int,
         "No asset found for scene %d (%r): Pollinations failed %d times (%s). "
         "The free image service may be rate-limited or temporarily down."
         % (index, query, POLLINATIONS_ATTEMPTS, str(last)[:160])) from None
+
+
+def _image_extension(raw: bytes) -> str:
+    """File extension from magic bytes; SVG is rejected (ffmpeg cannot rasterize it)."""
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "webp"
+    head = raw.lstrip()[:80].lower()
+    if b"<svg" in head or head.startswith(b"<?xml"):
+        raise ProviderError("The model returned an SVG image, which the renderer cannot use.")
+    raise ProviderError("Unrecognized image format (first bytes: %r)" % raw[:12])
+
+
+def generate_illustration(client: OpenRouterClient, prompt: str, dest_base: Path,
+                          model: str = ILLUSTRATION_MODELS[0], style: str = "",
+                          aspect_ratio: str = "16:9") -> Path:
+    """Generate one illustration with an OpenRouter image model, saved as dest_base.<ext>."""
+    text = (ILLUSTRATION_STYLES.get(style, "") + (prompt or "").strip()).strip()
+    if not text:
+        raise ValueError("Describe what the illustration should show.")
+    try:
+        urls = client.image(model, text, aspect_ratio)
+    except ProviderError:
+        if not aspect_ratio:
+            raise
+        urls = client.image(model, text, None)
+    for url in urls:
+        try:
+            if url.startswith("data:"):
+                raw = base64.b64decode(url.split(",", 1)[1])
+            else:
+                response = client.transport("GET", url, {"User-Agent": USER_AGENT}, None, 60.0)
+                raw = response.body if response.status < 400 else b""
+        except (ProviderError, ConnectionError):
+            continue
+        if not raw:
+            continue
+        try:
+            ext = _image_extension(raw)
+        except ProviderError:
+            continue
+        dest = Path(str(dest_base) + "." + ext)
+        dest.write_bytes(raw)
+        return dest
+    raise ProviderError("The image model %s returned no usable image." % model) from None
 
 
 def _first_frame(video: Path, dest: Path) -> bool:

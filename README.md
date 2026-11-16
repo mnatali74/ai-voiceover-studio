@@ -139,7 +139,12 @@ classified in detail by the model — description, tags, mood, setting, camera m
 and stored in a JSON catalog on disk (`clip_library/catalog.json`), your searchable B-roll
 database. From the video prompt and that catalog the model selects the best 3–8 shots, writes a
 spoken line for each, and the tab renders the final MP4 with the narrator voice you pick in the
-tab. The clips and frames also show up in the
+tab. Before spending time on the full render, a **Quick preview** button produces a fast, silent,
+low-resolution draft (`preview.mp4`) to check the flow HeyGen-style. For a **presentation look**
+(great for educational videos) the *Add illustrations* step rewrites the script inserting
+AI-generated images between the narration shots — every 1–3 shots, with a selectable OpenRouter
+image model and artistic style (e.g. *Infografica illustrata*); the renderer's Ken Burns motion
+turns each illustration into a moving infographic. The clips and frames also show up in the
 *Video* tab, where you tick exactly which ones to reuse as B-roll. A URL, a single clip or a
 subtitle fetch that fails is reported and the rest of the batch continues; the source video is
 deleted once its clips are cut, and a full disk stops the batch with a clear message. When

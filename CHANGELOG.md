@@ -23,6 +23,14 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **Quick preview and presentation-style illustrations in the Clip studio**: before the full
+  render, a *Quick preview* button produces a fast, silent, low-resolution draft (dummy voice,
+  half resolution, separate `preview.mp4`) so the flow can be checked HeyGen-style in seconds.
+  A new *Add illustrations* step inserts AI-generated images between the narration shots of the
+  script (every 1–3 shots, editable script afterwards): the image is requested from an OpenRouter
+  image model (`modalities: ["image"]`, selectable model and aspect ratio, six artistic styles
+  such as *Infografica illustrata*), and the renderer's Ken Burns motion turns each one into a
+  moving infographic. A failed illustration is reported and skipped, never fatal.
 - **Live progress in the Clip studio**: the build button now streams the work log into the status
   box as it happens, with elapsed seconds per step, instead of showing everything only at the
   end; clips are classified **in parallel** (3 at a time) so the batch finishes noticeably faster.

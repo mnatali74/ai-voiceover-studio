@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .ai_video import DEFAULT_MODELS
+from .ai_video import DEFAULT_MODELS, ILLUSTRATION_MODELS, ILLUSTRATION_STYLES
 from .errors import ProviderError, VoiceoverError
 from .providers import available_providers
 
@@ -192,8 +192,11 @@ def render_video_clip(script: str, provider: str, language: str, speed: float,
                       vertical: bool, style: str, music: str, broll: Optional[List[Any]],
                       session: Dict[str, Any], library: Optional[List[str]] = None,
                       transition_style: str = "mix", transition: float = 0.5,
-                      voice: Optional[str] = None) -> Tuple[str, Optional[str]]:
-    """Render the script to an MP4 (needs ffmpeg). Returns (status, video)."""
+                      voice: Optional[str] = None, small: bool = False,
+                      output_name: str = "video.mp4") -> Tuple[str, Optional[str]]:
+    """Render the script to an MP4 (needs ffmpeg). Returns (status, video).
+
+    With ``small=True`` the render is a fast low-resolution draft (preview)."""
     text = (script or "").strip()
     if not text:
         raise ValueError("Write a script first, or load an example.")
@@ -203,10 +206,14 @@ def render_video_clip(script: str, provider: str, language: str, speed: float,
     script_path = workdir / "script.md"
     script_path.write_text(text, encoding="utf-8")
     studio = Studio(provider or "auto")
-    out = workdir / "video.mp4"
+    out = workdir / output_name
     overrides = _voice_overrides(language, speed)
+    if small:
+        size = (540, 960) if vertical else (960, 540)
+    else:
+        size = (1080, 1920) if vertical else (1920, 1080)
     result = render_video(studio, save_broll(broll, session, extra=library), script_path, out,
-                          size=(1080, 1920) if vertical else (1920, 1080),
+                          size=size,
                           style="auto" if style == "auto" else style,
                           music=music or None, voice_overrides=overrides,
                           default_voice=voice or None,
@@ -517,6 +524,59 @@ def clip_render(script_text: str, provider: str, language: str, speed: float, vo
                              None, session, voice=voice or None)
 
 
+def clip_preview(script_text: str, vertical: bool, session: Dict[str, Any]
+                 ) -> Tuple[str, Optional[str]]:
+    """HeyGen-style fast draft: silent, low-resolution, small file — check the flow first."""
+    text = (script_text or "").strip()
+    if not text:
+        raise ValueError("Select the clips and build the script first.")
+    return render_video_clip(text, "dummy", "auto", 1.0, vertical, "clean", "", None,
+                             session, small=True, output_name="preview.mp4")
+
+
+def clip_illustrate(script_text: str, prompt: str, every: int, style: str, image_model: str,
+                    session: Dict[str, Any]) -> Tuple[str, str]:
+    """Presentation style: insert AI illustrations between the narration shots.
+
+    Every N narration blocks get a generated `![](image)` line (Ken Burns turns it into
+    a moving infographic). The script stays editable; failures never abort the batch."""
+    from .ai_video import ILLUSTRATION_MODELS, OpenRouterClient, generate_illustration
+    text = (script_text or "").strip()
+    if not text:
+        raise ValueError("Build the script first (Select the best clips…).")
+    every = max(1, int(every or 1))
+    model = (image_model or "").strip() or ILLUSTRATION_MODELS[0]
+    client = OpenRouterClient()
+    workdir = Path(session["dir"]) / "illustrations"
+    workdir.mkdir(parents=True, exist_ok=True)
+    out, notes, added, narrated = [], [], 0, 0
+    for line in text.splitlines():
+        out.append(line)
+        stripped = line.strip()
+        if not stripped or stripped.startswith("![") or stripped.startswith("#"):
+            continue
+        narrated += 1
+        if narrated % every:
+            continue
+        added += 1
+        context = "%s Context of the video: %s" % (stripped, (prompt or "").strip()[:200])
+        try:
+            path = generate_illustration(client, context, workdir / ("illustration_%02d" % added),
+                                         model=model, style=style)
+        except (ProviderError, ConnectionError) as exc:
+            notes.append("Illustration %d failed: %s" % (added, str(exc)[:140]))
+            continue
+        out += ["", "![](%s)" % path, ""]
+    if not added:
+        raise ValueError("No narration shot found to illustrate.")
+    status = ("Added **%d** illustrations (model **%s**, style **%s**) after every %d "
+              "narration shot(s). The script above is editable — run the quick preview to "
+              "check it." % (added - len(notes), model, style or "none", every))
+    for note in notes:
+        status += "\n\n⚠️ %s" % note
+    return status, "\n".join(out).strip() + "\n"
+
+
 def voice_choices(provider: str) -> Any:
     """Dropdown update with every voice id of the selected engine."""
     try:
@@ -771,6 +831,22 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
             clip_script = gr.Textbox(label="Final script (editable)", lines=8)
             clip_selected = gr.Dataframe(headers=["Clip", "Description", "Narration"],
                                          label="Chosen shots")
+            with gr.Row():
+                clip_every = gr.Dropdown(choices=["1", "2", "3"], value="2",
+                                         label="Illustration every N narration shots")
+                clip_illust_style = gr.Dropdown(choices=list(ILLUSTRATION_STYLES),
+                                                value="Infografica illustrata",
+                                                label="Illustration style (presentation)")
+                clip_illust_model = gr.Dropdown(choices=ILLUSTRATION_MODELS,
+                                                value=ILLUSTRATION_MODELS[0],
+                                                allow_custom_value=True,
+                                                label="Image model (OpenRouter)")
+            clip_illustrate_button = gr.Button("Add illustrations to the script "
+                                               "(presentation style)")
+            clip_illust_status = gr.Markdown()
+            clip_preview_button = gr.Button("Quick preview (silent, fast, low resolution)")
+            clip_preview_status = gr.Markdown()
+            clip_preview_out = gr.Video(label="Preview draft")
             clip_render_button = gr.Button("Render final video", variant="primary")
             clip_video_status = gr.Markdown()
             clip_video_out = gr.Video(label="Final video")
@@ -794,6 +870,13 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                      inputs=[clip_prompt, clip_model, clip_language,
                                              clip_duration, clip_len, session],
                                      outputs=[clip_select_status, clip_script, clip_selected])
+            clip_illustrate_button.click(clip_illustrate,
+                                         inputs=[clip_script, clip_prompt, clip_every,
+                                                 clip_illust_style, clip_illust_model, session],
+                                         outputs=[clip_illust_status, clip_script])
+            clip_preview_button.click(clip_preview,
+                                      inputs=[clip_script, clip_vertical, session],
+                                      outputs=[clip_preview_status, clip_preview_out])
             clip_render_button.click(clip_render,
                                      inputs=[clip_script, provider, clip_language, speed,
                                              clip_voice, clip_vertical, clip_style, clip_music,

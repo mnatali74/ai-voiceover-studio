@@ -199,3 +199,61 @@ def test_best_value_models_ranks_by_price(fake):
     assert ranked[0] == "free/fast-model"
     assert "text/embed-model" not in ranked
     assert ranked.index("cheap/long-model") < ranked.index("expensive/model")
+
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake-image-data"
+WEBP_BYTES = b"RIFF\x24\x00\x00\x00WEBPVP8 " + b"x" * 12
+
+
+def image_payload(url):
+    return (200, {"choices": [{"message": {"images": [{"image_url": {"url": url}}]}}]})
+
+
+def image_client(fake):
+    return OpenRouterClient(api_key="test-key", transport=fake)
+
+
+def test_generate_illustration_writes_data_url_png(fake, tmp_path):
+    from voiceover_studio.ai_video import generate_illustration
+    data_url = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode()
+    fake.add("POST", "https://openrouter.ai/api/v1/chat/completions", image_payload(data_url))
+    path = generate_illustration(image_client(fake), "compost bins from pallets",
+                                 tmp_path / "illu", style="Infografica illustrata")
+    assert path.name == "illu.png"
+    assert path.read_bytes() == PNG_BYTES
+    body = json.loads(fake.calls[-1]["body"])
+    assert body["modalities"] == ["image"]
+    assert body["image_config"] == {"aspect_ratio": "16:9"}
+    assert body["messages"][0]["content"].startswith("Illustrazione didattica")
+    assert "compost bins" in body["messages"][0]["content"]
+
+
+def test_generate_illustration_downloads_http_webp(fake, tmp_path):
+    from voiceover_studio.ai_video import generate_illustration
+    fake.add("POST", "https://openrouter.ai/api/v1/chat/completions",
+             image_payload("https://img.example.org/pic"))
+    fake.add("GET", "https://img.example.org/pic", (200, WEBP_BYTES))
+    path = generate_illustration(image_client(fake), "vineyard hills", tmp_path / "illu")
+    assert path.name == "illu.webp"
+    assert path.read_bytes() == WEBP_BYTES
+
+
+def test_generate_illustration_retries_without_aspect_ratio(fake, tmp_path):
+    from voiceover_studio.ai_video import generate_illustration
+    data_url = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode()
+    fake.add("POST", "https://openrouter.ai/api/v1/chat/completions",
+             (400, {"error": {"message": "image_config not supported"}}),
+             image_payload(data_url))
+    path = generate_illustration(image_client(fake), "old map", tmp_path / "illu")
+    assert path.suffix == ".png"
+    bodies = [json.loads(call["body"]) for call in fake.calls if call["method"] == "POST"]
+    assert "image_config" in bodies[0] and "image_config" not in bodies[1]
+
+
+def test_generate_illustration_rejects_svg(fake, tmp_path):
+    from voiceover_studio.ai_video import generate_illustration
+    svg = b"<svg xmlns='http://www.w3.org/2000/svg'></svg>"
+    data_url = "data:image/svg+xml;base64," + base64.b64encode(svg).decode()
+    fake.add("POST", "https://openrouter.ai/api/v1/chat/completions", image_payload(data_url))
+    with pytest.raises(ProviderError):
+        generate_illustration(image_client(fake), "timeline", tmp_path / "illu")

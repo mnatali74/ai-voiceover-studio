@@ -281,3 +281,73 @@ def test_voice_choices_never_crashes(tmp_path):
     from voiceover_studio.webui import voice_choices
     update = voice_choices("dummy")
     assert "choices" in update
+
+
+def test_clip_illustrate_inserts_generated_images(tmp_path, monkeypatch):
+    import voiceover_studio.ai_video as ai_video
+    from voiceover_studio.webui import clip_illustrate
+
+    def fake_illustration(client, prompt, dest_base, model="", style="", aspect_ratio="16:9"):
+        assert "Vigne al tramonto." in prompt
+        assert "enoturismo" in prompt
+        assert style == "Infografica illustrata"
+        path = Path(str(dest_base) + ".png")
+        path.write_bytes(b"png")
+        return path
+
+    monkeypatch.setattr(ai_video, "generate_illustration", fake_illustration)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    script = ("# Marche\n\n![](/tmp/c_01.mp4)\n\nColline infinite.\n\n"
+              "![](/tmp/c_02.mp4)\n\nVigne al tramonto.")
+    status, out = clip_illustrate(script, "enoturismo nelle Marche", "2",
+                                  "Infografica illustrata", "recraft/test", session)
+    assert "Added **1** illustrations" in status
+    assert out.count("illustration_01.png") == 1
+    assert out.index("illustration_01.png") > out.index("Vigne al tramonto.")
+    assert "illustration_01.png" not in out[:out.index("Vigne al tramonto.")]
+
+
+def test_clip_illustrate_every_shot_and_failure_is_not_fatal(tmp_path, monkeypatch):
+    import voiceover_studio.ai_video as ai_video
+    from voiceover_studio.errors import ProviderError
+    from voiceover_studio.webui import clip_illustrate
+
+    calls = []
+
+    def flaky(client, prompt, dest_base, model="", style="", aspect_ratio="16:9"):
+        calls.append(dest_base)
+        if len(calls) == 1:
+            raise ProviderError("boom")
+        path = Path(str(dest_base) + ".jpg")
+        path.write_bytes(b"jpg")
+        return path
+
+    monkeypatch.setattr(ai_video, "generate_illustration", flaky)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    script = "Prima frase.\n\nSeconda frase.\n\nTerza frase."
+    status, out = clip_illustrate(script, "compostaggio", "1", "", "some/model", session)
+    assert len(calls) == 3
+    assert "Illustration 1 failed" in status
+    assert "illustration_02.jpg" in out and "illustration_03.jpg" in out
+
+
+def test_clip_preview_uses_dummy_and_small_size(tmp_path, monkeypatch):
+    import voiceover_studio.webui as webui
+    from voiceover_studio.webui import clip_preview
+
+    captured = {}
+
+    def fake_render(script, provider, language, speed, vertical, style, music, broll,
+                    session, **kwargs):
+        captured.update(kwargs, provider=provider, vertical=vertical)
+        return "ok", "/tmp/preview.mp4"
+
+    monkeypatch.setattr(webui, "render_video_clip", fake_render)
+    session = new_session(tmp_path)
+    status, video = clip_preview("![](/tmp/c_01.mp4)\n\nTesto.", False, session)
+    assert status == "ok" and video == "/tmp/preview.mp4"
+    assert captured["provider"] == "dummy"
+    assert captured["small"] is True
+    assert captured["output_name"] == "preview.mp4"
