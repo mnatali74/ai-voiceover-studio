@@ -6,7 +6,7 @@ import pytest
 pytest.importorskip("gradio")
 
 from voiceover_studio.webui import _sample_sentence, build_ui, example_scripts, generate_voiceover, \
-    list_voices, new_session, pick_voice, say_line  # noqa: E402
+    list_voices, new_session, pick_voice, save_broll, say_line  # noqa: E402
 from voiceover_studio.webui import test_voice as preview_voice_line  # noqa: E402
 
 
@@ -59,6 +59,7 @@ def test_example_scripts_found():
     scripts = example_scripts()
     assert any(s.endswith("script.md") for s in scripts)
 
+
 def test_test_voice_with_dummy(tmp_path):
     session = new_session(tmp_path)
     status, audio = preview_voice_line("dummy-voice", "dummy", session)
@@ -80,3 +81,20 @@ def test_pick_voice_uses_clicked_row():
     rows = [["it-IT-GiuseppeNeural", "it", "Giuseppe"], ["en-US-AvaNeural", "en-US", "Ava"]]
     assert pick_voice(_Evt([1, 0]), rows) == "en-US-AvaNeural"
     assert pick_voice(_Evt(None), rows) == ""
+
+
+def test_save_broll_copies_in_upload_order(tmp_path):
+    session = new_session(tmp_path)
+    a = tmp_path / "moon.jpg"
+    a.write_bytes(b"x")
+    b = tmp_path / "stars.jpg"
+    b.write_bytes(b"y")
+    folder = save_broll([str(a), str(b)], session)
+    names = sorted(p.name for p in folder.iterdir())
+    assert names == ["001_moon.jpg", "002_stars.jpg"]
+
+
+def test_save_broll_empty(tmp_path):
+    session = new_session(tmp_path)
+    assert save_broll(None, session) is None
+    assert save_broll([], session) is None

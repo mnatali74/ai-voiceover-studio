@@ -13,6 +13,7 @@ directly from Python for tests.
 from __future__ import annotations
 
 import re
+import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -172,9 +173,21 @@ def list_voices(provider: str, filter_text: str) -> Tuple[str, List[List[Any]]]:
     return "**%d** voices for the **%s** engine." % (len(rows), studio.provider.name), rows
 
 
+def save_broll(files: Optional[List[Any]], session: Dict[str, Any]) -> Optional[Path]:
+    """Copy uploaded images/clips into the session in upload order; returns the folder."""
+    if not files:
+        return None
+    folder = Path(session["dir"]) / "broll"
+    folder.mkdir(parents=True, exist_ok=True)
+    for i, item in enumerate(files, 1):
+        src = Path(item if isinstance(item, (str, Path)) else item.name)
+        shutil.copy(src, folder / ("%03d_%s" % (i, src.name)))
+    return folder
+
+
 def render_video_clip(script: str, provider: str, language: str, speed: float,
-                      vertical: bool, style: str, music: str, session: Dict[str, Any]
-                      ) -> Tuple[str, Optional[str]]:
+                      vertical: bool, style: str, music: str, broll: Optional[List[Any]],
+                      session: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Render the script to an MP4 (needs ffmpeg). Returns (status, video)."""
     text = (script or "").strip()
     if not text:
@@ -187,7 +200,8 @@ def render_video_clip(script: str, provider: str, language: str, speed: float,
     studio = Studio(provider or "auto")
     out = workdir / "video.mp4"
     overrides = _voice_overrides(language, speed)
-    result = render_video(studio, None, script_path, out, size=(1080, 1920) if vertical else (1920, 1080),
+    result = render_video(studio, save_broll(broll, session), script_path, out,
+                          size=(1080, 1920) if vertical else (1920, 1080),
                           style="auto" if style == "auto" else style,
                           music=music or None, voice_overrides=overrides)
     status = ("Video **%.1f s**, %d shots, %s captions, engine **%s**."
@@ -276,12 +290,15 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                           value="auto", label="Caption style")
                 video_music = gr.Dropdown(choices=["", "ambient", "pulse"], value="",
                                           label="Background music")
+            broll = gr.File(label="B-roll images or video clips (optional, used in upload order "
+                                  "for paragraphs without ![](...)",
+                            file_count="multiple", file_types=["image", "video"])
             video_button = gr.Button("Render video", variant="primary")
             video_status = gr.Markdown()
             video_out = gr.Video(label="Video")
             video_button.click(render_video_clip,
                                inputs=[script, provider, language, speed, video_vertical,
-                                       video_style, video_music, session],
+                                       video_style, video_music, broll, session],
                                outputs=[video_status, video_out])
     return app
 

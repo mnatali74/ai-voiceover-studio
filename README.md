@@ -100,7 +100,8 @@ extra: `pip install "ai-voiceover-studio[webui]"`) where you can write or paste 
 the bundled examples, pick the engine, language and speed, then generate and listen to the voiceover
 with its SRT subtitles and segment table. A *Quick line* tab voices single sentences, a *Voices* tab
 browses the voices of the selected engine (click a row and hit *Test voice* for an instant preview),
-and a *Video* tab renders the finished MP4 when ffmpeg is installed. It binds to localhost by default (`--host`, `--port` to change).
+and a *Video* tab renders the finished MP4 when ffmpeg is installed, with optional B-roll images or
+clips uploaded directly in the browser. It binds to localhost by default (`--host`, `--port` to change).
 
 ## Why this exists
 
