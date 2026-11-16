@@ -23,6 +23,13 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **Video duration matches the narration reading time by default**: a new estimate of the
+  reading time (words at a natural ~150 wpm pace plus the renderer's pauses) drives both the
+  Clip studio and the AI Video tab. In the Clip studio a checkbox (on by default) makes the
+  model write the narrations to a word budget that reads in about the target duration, and the
+  status reports the measured reading time next to the target — move the duration slider and
+  re-select (or edit the script) to stretch or shorten the video. The AI scene planner gets the
+  same per-scene word budget from the requested duration.
 - **Google Colab notebook** (`colab/ai_voiceover_studio.ipynb`): the full web studio (all tabs,
   including AI Video and Clip studio) runs on Colab without any local setup — the keys
   (`OPENROUTER_API_KEY`, `PIXABAY_KEY`) come from the Colab secrets, a check cell tests both

@@ -44,7 +44,8 @@ PLAN_SYSTEM = (
     '[{{"narration": "one or two spoken sentences in {language}", '
     '"query": "2-5 simple English keywords for a stock footage search"}}]\n'
     "The narrations must flow as one continuous script: hook first, then the story, "
-    "then a closing line. Keep every narration under 40 words."
+    "then a closing line. The whole script must read in about {duration:.0f} seconds "
+    "(roughly {pace_words} spoken words per scene)."
 )
 
 VERIFY_PROMPT = (
@@ -178,7 +179,10 @@ def plan_scenes(client: OpenRouterClient, prompt: str, *, duration: float = 30.0
         raise ValueError("Write a prompt describing the video you want.")
     n = max(3, min(12, round(duration / 8.0)))
     lang = "the same language as the prompt" if language in ("", "auto") else language
-    content = client.chat(model, [{"role": "system", "content": PLAN_SYSTEM.format(n=n, language=lang)},
+    content = client.chat(model, [{"role": "system",
+                                   "content": PLAN_SYSTEM.format(n=n, language=lang,
+                                                                 duration=duration,
+                                                                 pace_words=round(duration / n * 2.5))},
                                   {"role": "user", "content": prompt}])
     raw = _parse_json(content)
     if not isinstance(raw, list) or not raw:

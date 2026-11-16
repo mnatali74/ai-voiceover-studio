@@ -696,3 +696,31 @@ def test_cookie_opts_from_argument_and_env(monkeypatch):
     monkeypatch.delenv("VOICEOVER_YTDLP_COOKIES")
     monkeypatch.setenv("VOICEOVER_YTDLP_COOKIES_FROM_BROWSER", "chrome:Profile 1")
     assert _cookie_opts() == {"cookiesfrombrowser": ("chrome",)}
+
+
+def test_estimate_speech_seconds_matches_narration_length():
+    from voiceover_studio.clips import estimate_speech_seconds
+    script = ("# Title\n\n![](/tmp/a.mp4)\n\n" + "word " * 25 + "\n\n![](/tmp/b.mp4)\n\n"
+              + "word " * 25)
+    reading = estimate_speech_seconds(script)
+    assert reading == 20.7  # 50 words / 2.5 wps + 2 segments * 0.35 s pause
+    assert estimate_speech_seconds("") == 0.0
+    assert estimate_speech_seconds("![](/tmp/a.mp4)\n\n# Only a header") == 0.0
+
+
+def test_select_clips_passes_pacing_budget(fake):
+    selection_json = '[{"id": "a_01", "narration": "Colline."}]'
+    catalog = [{"id": "a_01", "description": "hills", "tags": ["hills"],
+                "clip_path": "/tmp/a_01.mp4"}]
+    client = chat_client(fake, selection_json)
+    select_clips(client, "m", "enoturismo", catalog, max_shots=6, target_seconds=60)
+    body = json.loads(fake.calls[-1]["body"])
+    system = body["messages"][0]["content"]
+    assert "about 60 seconds" in system
+    assert "roughly 25 spoken words" in system  # 60 * 2.5 / 6 shots
+
+    fake.calls.clear()
+    client2 = chat_client(fake, selection_json)
+    select_clips(client2, "m", "enoturismo", catalog, max_shots=6)
+    body = json.loads(fake.calls[-1]["body"])
+    assert "reading time" not in body["messages"][0]["content"]

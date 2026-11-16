@@ -564,8 +564,12 @@ def classify_clip(client: Any, model: str, clip_path: Path, source_title: str,
 
 
 def select_clips(client: Any, model: str, prompt: str, catalog: List[Dict[str, Any]],
-                 language: str = "the user's language", max_shots: int = 8) -> List[Dict[str, Any]]:
-    """Prompt + catalog -> ordered [{entry, narration}] for the final video."""
+                 language: str = "the user's language", max_shots: int = 8,
+                 target_seconds: float = 0.0) -> List[Dict[str, Any]]:
+    """Prompt + catalog -> ordered [{entry, narration}] for the final video.
+
+    With ``target_seconds`` the model is asked to keep the whole narration to the matching
+    word budget, so the video lasts about as long as its reading time."""
     from .ai_video import _parse_json
     prompt = (prompt or "").strip()
     if not prompt:
@@ -578,9 +582,15 @@ def select_clips(client: Any, model: str, prompt: str, catalog: List[Dict[str, A
            ", ".join(entry.get("tags") or []), entry.get("camera", ""),
            entry.get("has_people"))
         for entry in catalog)
+    system = SELECT_SYSTEM.format(language=language, max_shots=max(3, max_shots))
+    if target_seconds and target_seconds > 0:
+        system += (" The whole narration must read in about %d seconds: keep every shot to "
+                   "roughly %d spoken words, so the video lasts about as long as its "
+                   "reading time."
+                   % (round(target_seconds),
+                      round(target_seconds * WORDS_PER_SECOND / max(3, max_shots))))
     content = client.chat(model, [{"role": "system",
-                                   "content": SELECT_SYSTEM.format(language=language,
-                                                                   max_shots=max(3, max_shots))},
+                                   "content": system},
                                   {"role": "user", "content": "Video idea: %s\n\nCatalog:\n%s"
                                    % (prompt, listing[:24000])}])
     raw = _parse_json(content)
@@ -647,6 +657,24 @@ def estimate_needs(duration: float, clip_seconds: float = 10.0) -> Tuple[int, in
     shots = max(3, round(duration / max(2.0, clip_seconds)))
     sources = max(2, -(-shots // 3))
     return shots, sources
+
+
+WORDS_PER_SECOND = 2.5  # comfortable narration pace at speed 1.0 (~150 words/minute)
+PAUSE_SECONDS = 0.35    # default pause the renderer puts between segments
+
+
+def estimate_speech_seconds(text: str, speed: float = 1.0) -> float:
+    """Reading time of a Markdown script: narration words at a natural pace plus pauses.
+
+    Media lines (``![](...)``), headers and markup do not count as spoken words."""
+    words, segments = 0, 0
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("!["):
+            continue
+        segments += 1
+        words += len(re.sub(r"!\[[^\]]*\]\([^)]*\)|\*\*|`", " ", stripped).split())
+    return round(words / (WORDS_PER_SECOND * max(0.5, speed)) + segments * PAUSE_SECONDS, 1)
 
 
 def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,

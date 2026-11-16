@@ -261,8 +261,8 @@ def test_clip_select_builds_script(tmp_path, monkeypatch):
     from voiceover_studio.webui import clip_select
 
     def fake_select(client, model, prompt, catalog, language="the user's language",
-                    max_shots=8):
-        assert language == "italian" and max_shots == 6
+                    max_shots=8, target_seconds=0.0):
+        assert language == "italian" and max_shots == 6 and target_seconds == 60.0
         return [{"entry": catalog[0], "narration": "Colline infinite."}]
 
     monkeypatch.setattr(clips, "select_clips", fake_select)
@@ -351,3 +351,30 @@ def test_clip_preview_uses_dummy_and_small_size(tmp_path, monkeypatch):
     assert captured["provider"] == "dummy"
     assert captured["small"] is True
     assert captured["output_name"] == "preview.mp4"
+
+
+def test_clip_select_reports_reading_time(tmp_path, monkeypatch):
+    import voiceover_studio.clips as clips
+    from voiceover_studio.webui import clip_select
+
+    seen = []
+
+    def fake_select(client, model, prompt, catalog, language="the user's language",
+                    max_shots=8, target_seconds=0.0):
+        seen.append(target_seconds)
+        return [{"entry": catalog[0], "narration": "word " * 25}]
+
+    monkeypatch.setattr(clips, "select_clips", fake_select)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    clips.save_catalog(session["dir"], [{"id": "c_01", "description": "hills",
+                                         "tags": ["hills"], "clip_path": "/tmp/c_01.mp4"}])
+    status, script, rows = clip_select("enoturismo", "some/model", "italian", 60, 10, session)
+    assert "reads in about **10 s**" in status  # 25 words / 2.5 + 0.35 pause
+    assert "Target was 60 s" in status
+
+    status2, _, _ = clip_select("enoturismo", "some/model", "italian", 60, 10, session,
+                                match_narration=False)
+    assert seen == [60.0, 0.0]
+    assert "Target was 60 s" not in status2
+    assert "reads in about" in status2

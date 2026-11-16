@@ -491,11 +491,15 @@ def clip_catalog_rows(session: Dict[str, Any]) -> List[List[Any]]:
 
 
 def clip_select(prompt: str, model: str, language: str, video_duration: float,
-                clip_seconds: float, session: Dict[str, Any]
-                ) -> Tuple[str, str, List[List[Any]]]:
-    """Prompt + clip catalog -> the model picks the best clips and writes the script."""
+                clip_seconds: float, session: Dict[str, Any],
+                match_narration: bool = True) -> Tuple[str, str, List[List[Any]]]:
+    """Prompt + clip catalog -> the model picks the best clips and writes the script.
+
+    With ``match_narration`` (default) the narrations are written to read in about the
+    target duration, so the video lasts about as long as its reading time."""
     from .ai_video import OpenRouterClient, best_value_models
-    from .clips import build_video_script, estimate_needs, load_catalog, select_clips
+    from .clips import (build_video_script, estimate_needs, estimate_speech_seconds,
+                        load_catalog, select_clips)
     catalog = load_catalog(Path(session["dir"]))
     if not catalog:
         raise ValueError("The clip library is empty: download some clips first.")
@@ -504,13 +508,21 @@ def clip_select(prompt: str, model: str, language: str, video_duration: float,
         model = best_value_models(client)[0]
     lang = "the same language as the prompt" if language in ("", "auto") else language
     shots, _ = estimate_needs(float(video_duration), float(clip_seconds))
-    selected = select_clips(client, model, prompt, catalog, language=lang, max_shots=shots)
+    target = float(video_duration) if match_narration else 0.0
+    selected = select_clips(client, model, prompt, catalog, language=lang, max_shots=shots,
+                            target_seconds=target)
     script = build_video_script(selected, title=prompt[:60])
     session["selected_clips"] = [item["entry"]["id"] for item in selected]
     rows = [[item["entry"]["id"], item["entry"].get("description", "")[:120], item["narration"]]
             for item in selected]
-    return ("Selected **%d** clips from the catalog (**%d** available) with model **%s**."
-            % (len(selected), len(catalog), model)), script, rows
+    status = ("Selected **%d** clips from the catalog (**%d** available) with model **%s**."
+              % (len(selected), len(catalog), model))
+    reading = estimate_speech_seconds(script)
+    status += " The narration reads in about **%.0f s**." % reading
+    if match_narration:
+        status += (" Target was %.0f s: to stretch or shorten the video, move the duration "
+                   "slider and re-select, or edit the script text." % float(video_duration))
+    return status, script, rows
 
 
 def clip_render(script_text: str, provider: str, language: str, speed: float, voice: str,
@@ -761,9 +773,10 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                      placeholder="Es.: video promozionale sull'enoturismo nelle "
                                                  "Marche, stile documentaristico")
             clip_duration = gr.Slider(15, 300, value=60, step=5,
-                                      label="Final video duration (s) — estimates how many clips "
-                                            "and sources are needed, and stops the batch when "
-                                            "enough are collected")
+                                      label="Final video duration (s) — target reading time of "
+                                            "the narrations; estimates how many clips and "
+                                            "sources are needed and stops the batch when enough "
+                                            "are collected")
             with gr.Row():
                 clip_model = gr.Dropdown(choices=["best value (auto)"] + DEFAULT_MODELS,
                                          value="best value (auto)", allow_custom_value=True,
@@ -825,6 +838,11 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                                   "box"], value="auto", label="Caption style")
                 clip_music = gr.Dropdown(choices=["", "ambient", "pulse"], value="ambient",
                                          label="Background music")
+            clip_auto_duration = gr.Checkbox(
+                value=True,
+                label="Match the video duration to the narration reading time (default) — "
+                      "the narrations are written to read in about the target duration; "
+                      "move the slider to stretch or shorten the video")
             clip_select_button = gr.Button("Select the best clips and write the script",
                                            variant="primary")
             clip_select_status = gr.Markdown()
@@ -868,7 +886,8 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
             clip_voices_button.click(voice_choices, inputs=[provider], outputs=[clip_voice])
             clip_select_button.click(clip_select,
                                      inputs=[clip_prompt, clip_model, clip_language,
-                                             clip_duration, clip_len, session],
+                                             clip_duration, clip_len, session,
+                                             clip_auto_duration],
                                      outputs=[clip_select_status, clip_script, clip_selected])
             clip_illustrate_button.click(clip_illustrate,
                                          inputs=[clip_script, clip_prompt, clip_every,

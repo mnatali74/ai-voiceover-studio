@@ -145,7 +145,10 @@ classified in detail by the model — description, tags, mood, setting, camera m
 and stored in a JSON catalog on disk (`clip_library/catalog.json`), your searchable B-roll
 database. From the video prompt and that catalog the model selects the best 3–8 shots, writes a
 spoken line for each, and the tab renders the final MP4 with the narrator voice you pick in the
-tab. Before spending time on the full render, a **Quick preview** button produces a fast, silent,
+tab. By default the narrations are written to a word budget that **reads in about the target
+duration**, so the video lasts about as long as its reading time — the status shows the measured
+reading time next to the target, and moving the duration slider (or editing the script) stretches
+or shortens the video. Before spending time on the full render, a **Quick preview** button produces a fast, silent,
 low-resolution draft (`preview.mp4`) to check the flow HeyGen-style. For a **presentation look**
 (great for educational videos) the *Add illustrations* step rewrites the script inserting
 AI-generated images between the narration shots — every 1–3 shots, with a selectable OpenRouter
