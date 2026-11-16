@@ -11,6 +11,9 @@ All notable changes to this project are documented here. The format follows
   it continues without a visual and renders as animated text, and the UI reports which scenes have
   no asset. Pollinations generation retries with fresh seeds and reports rate limiting clearly;
   keyless searches try progressively broader keyword sets.
+- Edge engine: the `edge-tts` requirement is now `>=7.2.7` (Microsoft changed the read-aloud
+  service in December 2025 and older versions fail with "No audio was received"), and the error
+  message suggests the upgrade when that exact failure occurs.
 
 ### Added
 - **AI Video tab**: a one-line prompt becomes a finished video. An OpenRouter model plans the

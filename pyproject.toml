@@ -60,12 +60,12 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-edge = ["edge-tts>=6.1.10"]
+edge = ["edge-tts>=7.2.7"]
 # Video is rendered with ffmpeg directly; the extra is kept so `[video]` installs keep working.
 video = []
 webui = ["gradio>=4"]
 yaml = ["PyYAML>=5.4"]
-all = ["edge-tts>=6.1.10", "PyYAML>=5.4", "gradio>=4"]
+all = ["edge-tts>=7.2.7", "PyYAML>=5.4", "gradio>=4"]
 dev = ["pytest>=7"]
 
 [project.scripts]
