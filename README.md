@@ -124,10 +124,15 @@ about, and the OpenRouter model turns the prompt into several varied YouTube sea
 five different sources, so no single video gets copied; people-focused titles like vlogs,
 tutorials and interviews are filtered out). You **preview the candidates inline without
 downloading** anything, tick the videos you like (or paste links manually), and the studio then
-downloads each source, reads its subtitles, asks the model to pick the most reusable,
-self-contained highlight segments, and cuts them into standalone **audio-free** mp4 clips with
-meaningful still frames extracted. Everything lands in the session library and shows up in the
-*Video* tab, where you tick exactly which clips and frames to reuse as B-roll. A URL that fails
+downloads each source (spaced by a configurable pause to respect YouTube's rate limits), reads
+its subtitles, asks the model to pick **every** reusable highlight segment, and cuts them into
+standalone **audio-free** mp4 clips with meaningful still frames extracted. Every clip is then
+classified in detail by the model — description, tags, mood, setting, camera move, people check —
+and stored in a JSON catalog on disk (`clip_library/catalog.json`), your searchable B-roll
+database. From the video prompt and that catalog the model selects the best 3–8 shots, writes a
+spoken line for each, and the tab renders the final MP4 with the narrator voice you pick in the
+tab. The clips and frames also show up in the
+*Video* tab, where you tick exactly which ones to reuse as B-roll. A URL that fails
 is reported and the rest of the batch continues. When YouTube answers "Sign in to confirm you're
 not a bot", make sure a JavaScript runtime is installed — recent yt-dlp needs
 [deno](https://docs.deno.com/runtime/getting_started/installation/) (or Node) on the machine to

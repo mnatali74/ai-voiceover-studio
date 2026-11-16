@@ -16,6 +16,12 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **Clip catalog and automatic final cut**: every extracted clip is classified in detail by the
+  model (description, tags, mood, setting, camera move, people check) and stored in a JSON
+  database (`clip_library/catalog.json`) together with the audio-free clip files; downloads are
+  spaced by a configurable pause to stay under YouTube's rate limits; from the video prompt and
+  the catalog the model then selects the best 3–8 shots, writes the narration for each, and the
+  tab renders the final video with a narrator voice chosen in the tab itself.
 - **Clip studio tab**: write the prompt of the video and get a reusable B-roll library. The
   OpenRouter model (or *best value (auto)*, which ranks the catalogue by price per token) turns
   the prompt into several varied YouTube searches — at least five distinct sources, people-focused

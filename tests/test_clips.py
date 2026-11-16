@@ -1,11 +1,15 @@
 """Offline tests for the clip studio (yt-dlp and ffmpeg mocked, OpenRouter faked)."""
+import base64
 import json
 
 import pytest
 
-from voiceover_studio.clips import (build_library, cut_clip, extract_frames, find_sources,
-                                    parse_vtt, probe_duration, search_youtube, suggest_searches,
-                                    suggest_segments, title_avoids_people)
+from voiceover_studio.clips import (build_library, build_video_script, catalog_path,
+                                    classify_clip, cut_clip, extract_frames, find_sources,
+                                    load_catalog, parse_vtt, probe_duration, save_catalog,
+                                    search_youtube, select_clips, suggest_searches,
+                                    suggest_segments, title_avoids_people,
+                                    _transcript_excerpt)
 from voiceover_studio.errors import ConfigError
 from voiceover_studio.providers.miragea import HttpResponse
 
@@ -158,8 +162,11 @@ def test_build_library_continues_after_download_failure(fake, monkeypatch, tmp_p
     monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "")
     monkeypatch.setattr(clips, "cut_clip", lambda src, start, end, dest, audio=False: dest)
     monkeypatch.setattr(clips, "extract_frames", lambda src, dest, every=3.0: [])
+    monkeypatch.setattr(clips, "classify_clip",
+                        lambda client, model, path, title, context: {"description": "x", "tags": []})
     library = build_library(["https://youtu.be/blocked", "https://youtu.be/ok"],
-                            tmp_path, None, "m", n_clips=1, clip_seconds=10.0, stills=False)
+                            tmp_path, None, "m", n_clips=1, clip_seconds=10.0, stills=False,
+                            delay=0.0)
     assert len(library["clips"]) == 1 and library["sources"] == ["Good video"]
     assert "bot check" in library["errors"][0] and "cookies.txt" in library["errors"][0]
 
@@ -220,6 +227,111 @@ def test_find_sources_deduplicates_across_queries(fake, monkeypatch):
     queries, candidates = find_sources(client, "m", "vineyards", sources=3)
     assert queries == ["q1", "q2", "q3"]
     assert len(candidates) == 1 and candidates[0]["query"] == "q1"
+
+
+def test_transcript_excerpt_keeps_nearby_lines():
+    transcript = "[00:05] opening line\n[00:30] middle line\n[02:00] far away"
+    assert "opening line" in _transcript_excerpt(transcript, 8.0, 15.0)
+    assert "middle line" not in _transcript_excerpt(transcript, 8.0, 15.0)
+    assert "far away" in _transcript_excerpt(transcript, 115.0, 125.0)
+
+
+def test_classify_clip_parses_details(fake, tmp_path, monkeypatch):
+    image = tmp_path / "clip_01.mp4.frame.jpg"
+    image.write_bytes(b"\xff\xd8fakejpeg")
+    monkeypatch.setattr("voiceover_studio.ai_video._first_frame", lambda video, dest: True)
+    answer = ('{"description": "Aerial view of green vineyard rows at sunset", '
+              '"tags": ["aerial", "vineyard", "sunset"], "mood": "calm", '
+              '"setting": "Italian countryside", "camera": "drone", '
+              '"has_people": false, "usable": true}')
+    client = chat_client(fake, answer)
+    details = classify_clip(client, "m", tmp_path / "clip_01.mp4", "Vineyards", "wine talk")
+    assert details["description"].startswith("Aerial view")
+    assert "vineyard" in details["tags"] and details["has_people"] is False
+    sent = fake.calls[-1]["body"].decode()
+    assert base64.b64encode(b"\xff\xd8fakejpeg").decode() in sent
+
+
+def test_classify_clip_falls_back_without_vision(fake, tmp_path, monkeypatch):
+    from voiceover_studio.providers.miragea import HttpResponse
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"video")
+    monkeypatch.setattr("voiceover_studio.ai_video._first_frame", lambda video, dest: False)
+
+    def flaky(method, url, headers, body, timeout):
+        payload = json.dumps({"choices": [{"message": {"content":
+            '{"description": "barrels", "tags": ["cellar"], "usable": true}'}}]}).encode()
+        if b"image_url" in (body or b""):
+            return HttpResponse(404, {}, b'{"error": "no vision"}')
+        return HttpResponse(200, {}, payload)
+
+    from voiceover_studio.ai_video import OpenRouterClient
+    client = OpenRouterClient(api_key="k", transport=flaky)
+    details = classify_clip(client, "m", media, "Cellar video")
+    assert details["description"] == "barrels" and details["tags"] == ["cellar"]
+
+
+def test_catalog_roundtrip(tmp_path):
+    entries = [{"id": "a_01", "description": "hills", "tags": ["hills"]}]
+    save_catalog(tmp_path, entries)
+    assert catalog_path(tmp_path).is_file()
+    assert load_catalog(tmp_path) == entries
+    assert load_catalog(tmp_path / "missing") == []
+
+
+def test_select_clips_maps_ids_and_ignores_unknown(fake):
+    catalog = [{"id": "a_01", "description": "green hills aerial", "tags": ["hills"],
+                "camera": "drone", "has_people": False, "clip_path": "/tmp/a_01.mp4"},
+               {"id": "b_01", "description": "wine barrels", "tags": ["cellar"],
+                "camera": "static", "has_people": False, "clip_path": "/tmp/b_01.mp4"}]
+    selection_json = '[{"id": "b_01", "narration": "Nelle cantine..."}, ' \
+                     '{"id": "ghost_99", "narration": "ignored"}, ' \
+                     '{"id": "a_01", "narration": "Colline a perdita d occhio."}]'
+    client = chat_client(fake, selection_json)
+    selected = select_clips(client, "m", "enoturismo", catalog, language="italian")
+    assert [item["entry"]["id"] for item in selected] == ["b_01", "a_01"]
+    assert selected[0]["narration"] == "Nelle cantine..."
+
+
+def test_build_video_script_pairs_clips_and_narration():
+    selected = [{"entry": {"id": "a_01", "clip_path": "/tmp/a_01.mp4"},
+                 "narration": "Colline a perdita d occhio."},
+                {"entry": {"id": "b_01", "clip_path": ""},
+                 "narration": "Nelle cantine il tempo si ferma."}]
+    text = build_video_script(selected, title="Enoturismo")
+    assert text.startswith("# Enoturismo")
+    assert "![](/tmp/a_01.mp4)" in text and "Colline" in text
+    assert "b_01" not in text
+
+
+def test_build_library_classifies_and_saves_catalog(fake, monkeypatch, tmp_path):
+    from voiceover_studio import clips
+    source = tmp_path / "sources" / "abc.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"video")
+    monkeypatch.setattr(clips, "download_video",
+                        lambda url, dest, cookies=None: (source, {"id": "abc",
+                                                                  "title": "Vineyards",
+                                                                  "duration": 120.0}))
+    monkeypatch.setattr(clips, "fetch_transcript", lambda url, dest, cookies=None: "[00:05] rows of vines")
+    monkeypatch.setattr(clips, "cut_clip", lambda src, start, end, dest, audio=False: dest)
+    monkeypatch.setattr(clips, "extract_frames", lambda src, dest, every=3.0: [])
+    monkeypatch.setattr(clips, "classify_clip",
+                        lambda client, model, path, title, context:
+                        {"description": "Green hills", "tags": ["hills"], "mood": "calm",
+                         "setting": "Tuscany", "camera": "drone", "has_people": False,
+                         "usable": True})
+    client = chat_client(fake, '[{"start": 5, "end": 15, "title": "Hills", "reason": "r"}, '
+                               '{"start": 30, "end": 40, "title": "Rows", "reason": "r"}]')
+    sleeps = []
+    library = build_library(["https://youtu.be/abc"], tmp_path, client, "m",
+                            n_clips=None, clip_seconds=10.0, stills=True, delay=7.0,
+                            sleep=sleeps.append)
+    assert len(library["catalog"]) == 2
+    assert library["catalog"][0]["id"] == "vineyards_01"
+    assert library["catalog"][0]["description"] == "Green hills"
+    assert load_catalog(tmp_path)[1]["segment_title"] == "Rows"
+    assert sleeps == [3.0]  # pause between download and subtitle fetch, none between sources
 
 
 def test_cookie_opts_from_argument_and_env(monkeypatch):

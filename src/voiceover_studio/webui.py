@@ -191,8 +191,8 @@ def save_broll(files: Optional[List[Any]], session: Dict[str, Any],
 def render_video_clip(script: str, provider: str, language: str, speed: float,
                       vertical: bool, style: str, music: str, broll: Optional[List[Any]],
                       session: Dict[str, Any], library: Optional[List[str]] = None,
-                      transition_style: str = "mix", transition: float = 0.5
-                      ) -> Tuple[str, Optional[str]]:
+                      transition_style: str = "mix", transition: float = 0.5,
+                      voice: Optional[str] = None) -> Tuple[str, Optional[str]]:
     """Render the script to an MP4 (needs ffmpeg). Returns (status, video)."""
     text = (script or "").strip()
     if not text:
@@ -209,6 +209,7 @@ def render_video_clip(script: str, provider: str, language: str, speed: float,
                           size=(1080, 1920) if vertical else (1920, 1080),
                           style="auto" if style == "auto" else style,
                           music=music or None, voice_overrides=overrides,
+                          default_voice=voice or None,
                           transition=float(transition), transition_style=transition_style)
     status = ("Video **%.1f s**, %d shots, %s captions, %s transitions, engine **%s**."
               % (result["duration"], result["shots"], result["style"], transition_style,
@@ -334,10 +335,10 @@ def clip_search(prompt: str, model: str, sources: int, cookies: str, session: Di
     return status, rows, _embed_html(candidates), gr.update(choices=labels, value=[])
 
 
-def clip_build(picks: List[str], manual_urls: str, model: str, n_clips: int,
-               clip_seconds: float, stills: bool, session: Dict[str, Any]
-               ) -> Tuple[str, List[str], List[Tuple[str, str]], Any]:
-    """Selected (or manually pasted) YouTube URLs -> audio-free clips + frames."""
+def clip_build(picks: List[str], manual_urls: str, model: str, all_clips: bool, n_clips: int,
+               clip_seconds: float, stills: bool, delay: float, session: Dict[str, Any]
+               ) -> Tuple[str, List[str], List[Tuple[str, str]], List[List[Any]], Any]:
+    """Selected (or manually pasted) YouTube URLs -> audio-free, classified clip library."""
     from .ai_video import OpenRouterClient, best_value_models
     from .clips import build_library
     labels = session.get("clip_labels") or {}
@@ -355,22 +356,79 @@ def clip_build(picks: List[str], manual_urls: str, model: str, n_clips: int,
         model = best_value_models(client)[0]
     workdir = Path(session["dir"])
     status_lines = ["Working with model **%s**..." % model]
-    library = build_library(urls, workdir, client, model, n_clips=int(n_clips),
+    library = build_library(urls, workdir, client, model,
+                            n_clips=None if all_clips else int(n_clips),
                             clip_seconds=float(clip_seconds), stills=bool(stills),
-                            cookies=session.get("cookies", ""),
+                            delay=float(delay), cookies=session.get("cookies", ""),
                             progress=lambda msg: status_lines.append("- %s" % msg))
     session["library"] = library
     picks_all = library["clips"] + library["frames"]
-    status = ("**%d** audio-free clips and **%d** frames from %d video(s), model **%s**.\n\n%s"
+    status = ("**%d** audio-free clips and **%d** frames from %d video(s), model **%s**. "
+              "Catalog: **%d** entries.\n\n%s"
               % (len(library["clips"]), len(library["frames"]), len(library["sources"]),
-                 model, "\n".join(status_lines)))
+                 model, len(library["catalog"]), "\n".join(status_lines)))
     for error in library.get("errors", []):
         status += "\n\n⚠️ %s" % error
     for seg in library["segments"]:
         status += "\n- %s — %s (%.0fs→%.0fs)" % (seg["title"], seg["source"],
                                                   seg["start"], seg["end"])
     frames_gallery = [(f, Path(f).parent.name) for f in library["frames"][:60]]
-    return status, library["clips"], frames_gallery, gr.update(choices=picks_all, value=[])
+    from .clips import load_catalog
+    catalog_rows = [[entry.get("id"), entry.get("source_title", "")[:40],
+                     entry.get("description", "")[:160], ", ".join(entry.get("tags") or [])[:120]]
+                    for entry in library["catalog"]]
+    return status, library["clips"], frames_gallery, catalog_rows, \
+        gr.update(choices=picks_all, value=[])
+
+
+def clip_catalog_rows(session: Dict[str, Any]) -> List[List[Any]]:
+    """Catalog database -> table rows (clip, source, description, tags)."""
+    from .clips import load_catalog
+    return [[entry.get("id"), entry.get("source_title", "")[:40],
+             entry.get("description", "")[:160], ", ".join(entry.get("tags") or [])[:120]]
+            for entry in load_catalog(Path(session["dir"]))]
+
+
+def clip_select(prompt: str, model: str, language: str, session: Dict[str, Any]
+                ) -> Tuple[str, str, List[List[Any]]]:
+    """Prompt + clip catalog -> the model picks the best clips and writes the script."""
+    from .ai_video import OpenRouterClient, best_value_models
+    from .clips import build_video_script, load_catalog, select_clips
+    catalog = load_catalog(Path(session["dir"]))
+    if not catalog:
+        raise ValueError("The clip library is empty: download some clips first.")
+    client = OpenRouterClient()
+    if model in ("", "best value (auto)"):
+        model = best_value_models(client)[0]
+    lang = "the same language as the prompt" if language in ("", "auto") else language
+    selected = select_clips(client, model, prompt, catalog, language=lang)
+    script = build_video_script(selected, title=prompt[:60])
+    session["selected_clips"] = [item["entry"]["id"] for item in selected]
+    rows = [[item["entry"]["id"], item["entry"].get("description", "")[:120], item["narration"]]
+            for item in selected]
+    return ("Selected **%d** clips from the catalog (**%d** available) with model **%s**."
+            % (len(selected), len(catalog), model)), script, rows
+
+
+def clip_render(script_text: str, provider: str, language: str, speed: float, voice: str,
+                vertical: bool, style: str, music: str, session: Dict[str, Any]
+                ) -> Tuple[str, Optional[str]]:
+    """Render the clip-based script with the chosen narrator voice."""
+    text = (script_text or "").strip()
+    if not text:
+        raise ValueError("Select the clips and build the script first.")
+    return render_video_clip(text, provider, language, speed, vertical, style, music,
+                             None, session, voice=voice or None)
+
+
+def voice_choices(provider: str) -> Any:
+    """Dropdown update with every voice id of the selected engine."""
+    try:
+        from .studio import Studio
+        voices, _ = Studio(provider or "auto").provider.list_voices(limit=1000, offset=0)
+        return gr.update(choices=[v.voice_id for v in voices])
+    except Exception:
+        return gr.update(choices=[])
 
 
 
@@ -565,26 +623,64 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
             clip_pick = gr.CheckboxGroup(choices=[], label="Select the videos to download "
                                                           "and cut", value=[])
             with gr.Row():
-                clip_n = gr.Slider(1, 6, value=2, step=1, label="Clips per video")
+                clip_all = gr.Checkbox(value=True, label="Extract every highlight (recommended)")
+                clip_n = gr.Slider(1, 6, value=2, step=1, label="…or this many clips per video")
                 clip_len = gr.Slider(5, 30, value=10, step=1, label="Clip length (s)")
+                clip_delay = gr.Slider(0, 20, value=5, step=1,
+                                       label="Pause between downloads (s, anti-ban)")
             clip_stills = gr.Checkbox(value=True, label="Also extract still frames from the clips")
             clip_manual = gr.Textbox(label="Or paste YouTube links manually (optional)", lines=2,
                                      placeholder="https://www.youtube.com/watch?v=...")
-            clip_button = gr.Button("Download selected videos, pick highlights and cut clips",
+            clip_button = gr.Button("Download selected videos, extract and classify all clips",
                                     variant="primary")
             clip_status = gr.Markdown()
             with gr.Row():
                 clip_files = gr.Files(label="Cut clips — audio-free (reuse them as B-roll)")
                 clip_frames = gr.Gallery(label="Extracted frames", columns=6, height=260)
+            clip_catalog = gr.Dataframe(headers=["Clip", "Source", "Description", "Tags"],
+                                        label="Clip catalog (database, saved on disk)")
+
+            gr.Markdown("### Final video\nPick the narrator voice, then let the model choose the "
+                        "best clips from the catalog and build the video.")
+            with gr.Row():
+                clip_voice = gr.Dropdown(choices=[], label="Narrator voice", allow_custom_value=True)
+                clip_voices_button = gr.Button("Load voices")
+                clip_language = gr.Dropdown(choices=LANGUAGES, value="auto", label="Language")
+            with gr.Row():
+                clip_vertical = gr.Checkbox(value=False, label="Vertical 9:16")
+                clip_style = gr.Dropdown(choices=["auto", "tiktok", "bold", "clean", "minimal",
+                                                  "box"], value="auto", label="Caption style")
+                clip_music = gr.Dropdown(choices=["", "ambient", "pulse"], value="ambient",
+                                         label="Background music")
+            clip_select_button = gr.Button("Select the best clips and write the script",
+                                           variant="primary")
+            clip_select_status = gr.Markdown()
+            clip_script = gr.Textbox(label="Final script (editable)", lines=8)
+            clip_selected = gr.Dataframe(headers=["Clip", "Description", "Narration"],
+                                         label="Chosen shots")
+            clip_render_button = gr.Button("Render final video", variant="primary")
+            clip_video_status = gr.Markdown()
+            clip_video_out = gr.Video(label="Final video")
+
             clip_search_button.click(clip_search,
                                      inputs=[clip_prompt, clip_model, clip_sources,
                                              clip_cookies, session],
                                      outputs=[clip_search_status, clip_results, clip_previews,
                                               clip_pick])
             clip_button.click(clip_build,
-                              inputs=[clip_pick, clip_manual, clip_model, clip_n, clip_len,
-                                      clip_stills, session],
-                              outputs=[clip_status, clip_files, clip_frames, library_pick])
+                              inputs=[clip_pick, clip_manual, clip_model, clip_all, clip_n,
+                                      clip_len, clip_stills, clip_delay, session],
+                              outputs=[clip_status, clip_files, clip_frames, clip_catalog,
+                                       library_pick])
+            clip_voices_button.click(voice_choices, inputs=[provider], outputs=[clip_voice])
+            clip_select_button.click(clip_select,
+                                     inputs=[clip_prompt, clip_model, clip_language, session],
+                                     outputs=[clip_select_status, clip_script, clip_selected])
+            clip_render_button.click(clip_render,
+                                     inputs=[clip_script, provider, clip_language, speed,
+                                             clip_voice, clip_vertical, clip_style, clip_music,
+                                             session],
+                                     outputs=[clip_video_status, clip_video_out])
 
     return app
 
