@@ -59,7 +59,7 @@ def _engine_choices() -> List[str]:
 
 
 def new_session(workdir: Optional[Path] = None) -> Dict[str, Any]:
-    base = Path(workdir) if workdir else Path(tempfile.gettempdir()) / "voiceover-studio"
+    base = Path(workdir).resolve() if workdir else Path(tempfile.gettempdir()) / "voiceover-studio"
     session = base / uuid.uuid4().hex[:12]
     session.mkdir(parents=True, exist_ok=True)
     return {"dir": session}
@@ -238,7 +238,7 @@ def ai_plan(prompt: str, duration: float, language: str, orientation: str, model
 def ai_regenerate(scene_number: int, orientation: str, session: Dict[str, Any]
                   ) -> Tuple[str, List[Tuple[str, str]]]:
     """Replace one scene's asset with a freshly generated image (keyless)."""
-    from .ai_video import generate_asset
+    from .ai_video import Scene, generate_asset
     scenes = [Scene(**d) for d in session.get("scenes", [])]
     if not scenes:
         raise ValueError("Plan the scenes first.")

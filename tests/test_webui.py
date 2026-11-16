@@ -94,6 +94,36 @@ def test_save_broll_copies_in_upload_order(tmp_path):
     assert names == ["001_moon.jpg", "002_stars.jpg"]
 
 
+def test_new_session_is_absolute(tmp_path):
+    session = new_session(tmp_path / "rel")
+    assert Path(session["dir"]).is_absolute()
+
+
+def test_ai_regenerate_replaces_asset(tmp_path, monkeypatch):
+    import voiceover_studio.ai_video as ai_video
+    from voiceover_studio.webui import ai_plan, ai_regenerate
+
+    def fake_plan(client, prompt, workdir, **kwargs):
+        scene = ai_video.Scene(0, "Line one.", "pyramids")
+        scene.asset_path, scene.source = str(workdir / "scene_00.jpg"), "openverse image"
+        return [scene]
+
+    def fake_generate(query, orientation, workdir, index, transport=None):
+        workdir.mkdir(parents=True, exist_ok=True)
+        target = workdir / "scene_00.jpg"
+        target.write_bytes(b"new")
+        return target, "generated (pollinations)"
+
+    monkeypatch.setattr(ai_video, "plan_and_fetch", fake_plan)
+    monkeypatch.setattr(ai_video, "generate_asset", fake_generate)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    ai_plan("pyramids", 30.0, "auto", "landscape", "m", False, "m", session)
+    status, gallery = ai_regenerate("1", "landscape", session)
+    assert "regenerated" in status
+    assert gallery[0][0].endswith("scene_00.jpg")
+
+
 def test_save_broll_empty(tmp_path):
     session = new_session(tmp_path)
     assert save_broll(None, session) is None
