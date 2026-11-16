@@ -152,12 +152,46 @@ def test_clip_search_populates_candidates(tmp_path, monkeypatch):
     monkeypatch.setattr(clips, "find_sources", fake_find_sources)
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     session = new_session(tmp_path)
-    status, rows, previews, update = clip_search("enoturismo Marche", "some/model", 5, "", session)
+    status, rows, previews, update = clip_search("enoturismo Marche", "some/model", 5, "", "",
+                                                 session)
     assert "**2** searches, **2** candidate" in status
     assert rows[0][1] == "Aerial vineyard hills"
     assert "youtube.com/embed/abc" in previews and "youtube.com/embed/def" in previews
     assert update["choices"][0].startswith("Aerial vineyard hills")
     assert session["clip_labels"][update["choices"][0]] == "https://youtu.be/abc"
+
+
+def test_clip_search_uses_manual_queries_without_llm(tmp_path, monkeypatch):
+    from voiceover_studio.webui import clip_search
+    import voiceover_studio.clips as clips
+
+    def fake_search(query, limit=4, cookies=None):
+        return [{"id": query[:3], "title": "Result of %s" % query, "channel": "C",
+                 "duration": 120.0, "url": "https://youtu.be/" + query[:3]}]
+
+    monkeypatch.setattr(clips, "search_youtube", fake_search)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    session = new_session(tmp_path)
+    status, rows, previews, update = clip_search("enoturismo Marche", "best value (auto)", 5,
+                                                 "aerial vineyard hills\n\nwine cellar barrels",
+                                                 "", session)
+    assert "**2** searches, **2** candidate" in status
+    assert rows[0][3] == "aerial vineyard hills" and rows[1][3] == "wine cellar barrels"
+    assert session["clip_labels"][update["choices"][0]].endswith("aer")
+
+
+def test_clip_suggest_fills_editable_queries(tmp_path, monkeypatch):
+    from voiceover_studio.webui import clip_suggest
+    import voiceover_studio.clips as clips
+
+    monkeypatch.setattr(clips, "suggest_searches",
+                        lambda client, model, prompt, n=5:
+                        ["q%d" % i for i in range(1, n + 1)])
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    status, text = clip_suggest("enoturismo Marche", "some/model", 3, session)
+    assert "**3** queries" in status
+    assert text == "q1\nq2\nq3"
 
 
 def test_clip_build_uses_selected_sources(tmp_path, monkeypatch):

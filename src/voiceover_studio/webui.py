@@ -304,21 +304,48 @@ def _embed_html(candidates: List[Dict[str, Any]], limit: int = 6) -> str:
     return '<div style="display:flex;flex-wrap:wrap;gap:8px">%s</div>' % frames
 
 
-def clip_search(prompt: str, model: str, sources: int, cookies: str, session: Dict[str, Any]
-                ) -> Tuple[str, List[List[Any]], str, Any]:
-    """Prompt -> varied YouTube searches -> candidate B-roll videos (preview only)."""
+def clip_suggest(prompt: str, model: str, sources: int, session: Dict[str, Any]
+                 ) -> Tuple[str, str]:
+    """Prompt -> editable search queries, one per line (the model only suggests)."""
     from .ai_video import OpenRouterClient, best_value_models
-    from .clips import find_sources
+    from .clips import suggest_searches
     if not (prompt or "").strip():
         raise ValueError("Write the prompt of the video you want to build.")
     client = OpenRouterClient()
     if model in ("", "best value (auto)"):
         model = best_value_models(client)[0]
-    status_lines = ["Searching with model **%s**..." % model]
+    queries = suggest_searches(client, model, prompt, n=int(sources))
+    return ("**%d** queries suggested by model **%s**. Edit them freely (one per line), "
+            "then run the search." % (len(queries), model)), "\n".join(queries)
+
+
+def clip_search(prompt: str, model: str, sources: int, queries: str, cookies: str,
+                session: Dict[str, Any]
+                ) -> Tuple[str, List[List[Any]], str, Any]:
+    """Search queries (edited by the user, or suggested from the prompt) -> candidates."""
+    from .ai_video import OpenRouterClient, best_value_models
+    from .clips import find_sources, search_youtube
+    if not (prompt or "").strip():
+        raise ValueError("Write the prompt of the video you want to build.")
     session["cookies"] = cookies or ""
-    queries, candidates = find_sources(client, model, prompt, sources=int(sources),
-                                       cookies=cookies,
-                                       progress=lambda msg: status_lines.append("- %s" % msg))
+    status_lines = []
+    manual = [q.strip() for q in (queries or "").splitlines() if q.strip()]
+    if manual:
+        queries_used, candidates, seen = manual, [], set()
+        for query in manual:
+            status_lines.append("- Searching YouTube: %s" % query)
+            for item in search_youtube(query, limit=4, cookies=cookies):
+                if item["id"] not in seen:
+                    seen.add(item["id"])
+                    candidates.append({"query": query, **item})
+    else:
+        client = OpenRouterClient()
+        if model in ("", "best value (auto)"):
+            model = best_value_models(client)[0]
+        status_lines.append("Searching with model **%s**..." % model)
+        queries_used, candidates = find_sources(client, model, prompt, sources=int(sources),
+                                                cookies=cookies,
+                                                progress=lambda msg: status_lines.append("- %s" % msg))
     session["clip_candidates"] = candidates
     session["clip_labels"] = {}
     labels = []
@@ -332,7 +359,7 @@ def clip_search(prompt: str, model: str, sources: int, cookies: str, session: Di
     status = ("**%d** searches, **%d** candidate videos (people-focused titles, videos under "
               "30 s and over 30 min filtered out). Watch the previews, then select the videos "
               "to download below.\n\n%s"
-              % (len(queries), len(candidates), "\n".join(status_lines)))
+              % (len(queries_used), len(candidates), "\n".join(status_lines)))
     return status, rows, _embed_html(candidates), gr.update(choices=labels, value=[])
 
 
@@ -594,12 +621,12 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                    outputs=[ai_video_status, ai_video_out])
 
         with gr.Tab("Clip studio"):
-            gr.Markdown("Describe the video you are building: the model turns the prompt into "
-                        "varied YouTube searches (at least 5 different sources, people-focused "
-                        "titles filtered out), you **preview the candidates right here without "
-                        "downloading**, select the ones you like, and the studio downloads them, "
-                        "picks the highlight segments, and cuts **audio-free** clips plus still "
-                        "frames to reuse as B-roll in the **Video** tab. "
+            gr.Markdown("Describe the video you are building: the model suggests varied YouTube "
+                        "search queries (**editable below**, or write your own — searching with "
+                        "your own queries needs no API key), you **preview the candidates right "
+                        "here without downloading**, select the ones you like, and the studio "
+                        "downloads them, picks the highlight segments, and cuts **audio-free** "
+                        "clips plus still frames to reuse as B-roll in the **Video** tab. "
                         "Needs `OPENROUTER_API_KEY`, [yt-dlp](https://github.com/yt-dlp/yt-dlp) "
                         "(`pip install \"ai-voiceover-studio[clip]\"`), a JavaScript runtime "
                         "(deno) and ffmpeg.")
@@ -617,7 +644,12 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                             "export, needed when YouTube asks to sign in",
                                       value="", lines=1,
                                       placeholder="/percorso/cookies.txt")
-            clip_search_button = gr.Button("Find video sources on YouTube", variant="primary")
+            clip_suggest_button = gr.Button("Suggest search queries from the prompt")
+            clip_suggest_status = gr.Markdown()
+            clip_queries = gr.Textbox(label="Search queries (one per line, editable)", lines=5,
+                                      placeholder="Leave empty to let the model search for you, "
+                                                  "or write your own queries here")
+            clip_search_button = gr.Button("Search YouTube with these queries", variant="primary")
             clip_search_status = gr.Markdown()
             clip_results = gr.Dataframe(headers=["#", "Title", "Channel", "Search"],
                                         label="Candidate videos")
@@ -664,9 +696,12 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
             clip_video_status = gr.Markdown()
             clip_video_out = gr.Video(label="Final video")
 
+            clip_suggest_button.click(clip_suggest,
+                                      inputs=[clip_prompt, clip_model, clip_sources, session],
+                                      outputs=[clip_suggest_status, clip_queries])
             clip_search_button.click(clip_search,
                                      inputs=[clip_prompt, clip_model, clip_sources,
-                                             clip_cookies, session],
+                                             clip_queries, clip_cookies, session],
                                      outputs=[clip_search_status, clip_results, clip_previews,
                                               clip_pick])
             clip_button.click(clip_build,

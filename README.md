@@ -120,9 +120,11 @@ for the scene plan and the vision check.
 ## Clip studio: reuse YouTube footage
 
 The *Clip studio* tab turns a prompt into a personal B-roll library. Write what the video is
-about, and the OpenRouter model turns the prompt into several varied YouTube searches (at least
-five different sources, so no single video gets copied; people-focused titles like vlogs,
-tutorials and interviews are filtered out). You **preview the candidates inline without
+about, and the OpenRouter model suggests several varied YouTube search queries (at least five
+different sources, so no single video gets copied) shown in an **editable form** — tune them or
+write your own (hand-written queries need no API key) — then the search runs on them;
+people-focused titles like vlogs, tutorials and interviews are filtered out. You **preview the
+candidates inline without
 downloading** anything, tick the videos you like (or paste links manually), and the studio then
 reads each source's metadata and subtitles (spaced by a configurable pause to respect YouTube's
 rate limits), asks the model to pick **every** reusable highlight segment, and downloads **only

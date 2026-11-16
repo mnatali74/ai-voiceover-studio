@@ -23,6 +23,9 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **Editable search queries in the Clip studio**: the model's suggested YouTube queries are now
+  shown in an editable form (one per line) before searching, so the search no longer returns the
+  same generic results; queries written by hand work without any API key.
 - **Clip catalog and automatic final cut**: every extracted clip is classified in detail by the
   model (description, tags, mood, setting, camera move, people check) and stored in a JSON
   database (`clip_library/catalog.json`) together with the audio-free clip files; downloads are
