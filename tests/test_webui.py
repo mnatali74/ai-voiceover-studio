@@ -1,4 +1,5 @@
 """Offline tests for the Gradio web studio (skipped when gradio is not installed)."""
+import time
 from pathlib import Path
 
 import pytest
@@ -225,6 +226,8 @@ def test_clip_build_uses_selected_sources(tmp_path, monkeypatch):
         assert kwargs.get("keep_audio", False) is False
         assert kwargs["n_clips"] is None and kwargs["delay"] == 5.0
         assert kwargs["target_clips"] == 9
+        kwargs["progress"]("Downloading https://youtu.be/abc")
+        time.sleep(1.5)
         catalog = [{"id": "c_01", "source_title": "Vineyards",
                     "clip_path": str(workdir / "clip_library" / "clips" / "c_01.mp4"),
                     "description": "Green hills", "tags": ["hills"]}]
@@ -238,9 +241,12 @@ def test_clip_build_uses_selected_sources(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     session = new_session(tmp_path)
     session["clip_labels"] = {"Aerial hills — C (5:00)": "https://youtu.be/abc"}
-    status, clip_files, frames, catalog_rows, update = clip_build(
+    yields = list(clip_build(
         ["Aerial hills — C (5:00)"], "https://youtu.be/xyz", "some/model", True, 2,
-        10, True, 5.0, 60, session)
+        10, True, 5.0, 60, session))
+    assert len(yields) >= 2
+    assert "Downloading https://youtu.be/abc" in yields[-2][0]
+    status, clip_files, frames, catalog_rows, update = yields[-1]
     assert "Target: a **60 s** video → **6** shots" in status
     assert "audio-free clips and **1** frames" in status and "Catalog: **1** entries" in status
     assert "Drone shot" in status

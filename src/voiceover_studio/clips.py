@@ -780,6 +780,7 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
             offsets, partial = None, False
         stem = _slug(title)
         aborted = False
+        prepared: List[Tuple[int, Dict[str, Any], Path, List[Path]]] = []
         for j, seg in enumerate(segments, 1):
             start, end = seg["start"], seg["end"]
             if partial and offsets is not None:
@@ -798,15 +799,6 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
                     frames = extract_frames(clip_path, lib_dir / "frames" / ("%s_%02d" % (stem, j)),
                                             every=frame_every)
                     library["frames"].extend(str(frame) for frame in frames)
-                if progress:
-                    progress("Classifying %s (%d/%d)" % (seg["title"], j, len(segments)))
-                try:
-                    details = classify_clip(client, model, clip_path, title,
-                                            _transcript_excerpt(transcript, seg["start"], seg["end"]))
-                except (ProviderError, ConfigError, ConnectionError) as exc:
-                    details = {"description": "classification failed: %s" % str(exc)[:150],
-                               "tags": [], "mood": "", "setting": "", "camera": "",
-                               "has_people": None, "usable": True}
             except Exception as exc:
                 if _is_disk_full(exc):
                     library["errors"].append(_disk_full_message())
@@ -815,12 +807,32 @@ def build_library(urls: List[str], workdir: Path, client: Any, model: str, *,
                 library["errors"].append("clip %s (%s) failed: %s"
                                          % (clip_path.name, seg["title"], str(exc)[:200]))
                 continue
-            entry = {"id": "%s_%02d" % (stem, j), "source_url": url, "source_title": title,
-                     "clip_path": str(clip_path), "start": seg["start"], "end": seg["end"],
-                     "segment_title": seg["title"], "frames": [str(f) for f in frames],
-                     **details}
-            catalog.append(entry)
-            library["catalog"] = catalog
+            prepared.append((j, seg, clip_path, frames))
+        if prepared:
+            if progress:
+                progress("Classifying %d clip(s) of %s in parallel" % (len(prepared), title))
+
+            def classify_one(item: Tuple[int, Dict[str, Any], Path, List[Path]]) -> Dict[str, Any]:
+                _, seg, clip_path, _frames = item
+                try:
+                    return classify_clip(client, model, clip_path, title,
+                                         _transcript_excerpt(transcript, seg["start"], seg["end"]))
+                except (ProviderError, ConfigError, ConnectionError) as exc:
+                    return {"description": "classification failed: %s" % str(exc)[:150],
+                            "tags": [], "mood": "", "setting": "", "camera": "",
+                            "has_people": None, "usable": True}
+
+            from concurrent.futures import ThreadPoolExecutor
+            workers = min(3, len(prepared))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                details_list = list(pool.map(classify_one, prepared))
+            for (j, seg, clip_path, frames), details in zip(prepared, details_list):
+                entry = {"id": "%s_%02d" % (stem, j), "source_url": url, "source_title": title,
+                         "clip_path": str(clip_path), "start": seg["start"], "end": seg["end"],
+                         "segment_title": seg["title"], "frames": [str(f) for f in frames],
+                         **details}
+                catalog.append(entry)
+                library["catalog"] = catalog
             save_catalog(workdir, catalog)
         if not keep_sources and path is not None and path.is_file():
             try:

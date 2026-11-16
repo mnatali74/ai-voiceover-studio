@@ -23,6 +23,9 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **Live progress in the Clip studio**: the build button now streams the work log into the status
+  box as it happens, with elapsed seconds per step, instead of showing everything only at the
+  end; clips are classified **in parallel** (3 at a time) so the batch finishes noticeably faster.
 - **Target duration drives the Clip studio**: a new field asks for the final video duration at
   the start; from it the studio estimates how many shots, clips and sources are needed, caps the
   clips extracted per source, and **stops the batch as soon as enough clips are cut** — no more

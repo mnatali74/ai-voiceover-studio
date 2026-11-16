@@ -383,12 +383,17 @@ def clip_search(prompt: str, model: str, sources: int, queries: str, cookies: st
 def clip_build(picks: List[str], manual_urls: str, model: str, all_clips: bool, n_clips: int,
                clip_seconds: float, stills: bool, delay: float, video_duration: float,
                session: Dict[str, Any]
-               ) -> Tuple[str, List[str], List[Tuple[str, str]], List[List[Any]], Any]:
+               ) -> Any:
     """Selected (or manually pasted) source URLs -> audio-free, classified clip library.
 
-    The final video duration drives the estimate: how many shots (clips) and
-    sources are needed, and the batch stops as soon as enough clips are cut.
+    A generator: streams the work log with elapsed times into the status box while
+    the batch runs. The final video duration drives the estimate: how many shots
+    (clips) and sources are needed, and the batch stops as soon as enough clips
+    are cut.
     """
+    import queue as queue_lib
+    import threading
+    import time as time_lib
     from .ai_video import OpenRouterClient, best_value_models
     from .clips import build_library, estimate_needs
     labels = session.get("clip_labels") or {}
@@ -412,13 +417,43 @@ def clip_build(picks: List[str], manual_urls: str, model: str, all_clips: bool, 
                     % (int(video_duration), shots, int(clip_seconds), target_clips,
                        sources_needed),
                     "Working with model **%s**..." % model]
-    library = build_library(urls, workdir, client, model,
-                            n_clips=None if all_clips else int(n_clips),
-                            clip_seconds=float(clip_seconds), stills=bool(stills),
-                            delay=float(delay), cookies=session.get("cookies", ""),
-                            titles=session.get("clip_titles") or {},
-                            target_clips=target_clips,
-                            progress=lambda msg: status_lines.append("- %s" % msg))
+    empty = ([], [], [], gr.update())
+    yield ("\n".join(status_lines), *empty)
+    messages: queue_lib.Queue = queue_lib.Queue()
+    result: Dict[str, Any] = {}
+
+    def worker() -> None:
+        try:
+            result["library"] = build_library(urls, workdir, client, model,
+                                              n_clips=None if all_clips else int(n_clips),
+                                              clip_seconds=float(clip_seconds), stills=bool(stills),
+                                              delay=float(delay), cookies=session.get("cookies", ""),
+                                              titles=session.get("clip_titles") or {},
+                                              target_clips=target_clips,
+                                              progress=messages.put)
+        except Exception as exc:
+            result["error"] = exc
+
+    started = time_lib.time()
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        try:
+            msg = messages.get(timeout=1.0)
+            while True:
+                try:
+                    msg = messages.get_nowait()
+                except queue_lib.Empty:
+                    break
+            status_lines.append("- [%ds] %s" % (int(time_lib.time() - started), msg))
+            yield ("\n".join(status_lines), *empty)
+        except queue_lib.Empty:
+            pass
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    library = result["library"]
+    status_lines.append("- [%ds] done" % int(time_lib.time() - started))
     session["library"] = library
     picks_all = library["clips"] + library["frames"]
     status = ("**%d** audio-free clips and **%d** frames from %d video(s), model **%s**. "
@@ -436,7 +471,7 @@ def clip_build(picks: List[str], manual_urls: str, model: str, all_clips: bool, 
     catalog_rows = [[entry.get("id"), entry.get("source_title", "")[:40],
                      entry.get("description", "")[:160], ", ".join(entry.get("tags") or [])[:120]]
                     for entry in library["catalog"]]
-    return status, library["clips"], frames_gallery, catalog_rows, \
+    yield status, library["clips"], frames_gallery, catalog_rows, \
         gr.update(choices=picks_all, value=[])
 
 
