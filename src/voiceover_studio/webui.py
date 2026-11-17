@@ -20,8 +20,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .ai_video import DEFAULT_MODELS, ILLUSTRATION_MODELS, ILLUSTRATION_STYLES
-from .errors import ProviderError, VoiceoverError
+from .ai_video import DEFAULT_MODELS
+from .overlays import CARD_STYLES
+from .errors import ConfigError, ProviderError, VoiceoverError
 from .providers import available_providers
 
 import gradio as gr
@@ -577,23 +578,20 @@ def clip_preview(script_text: str, vertical: bool, session: Dict[str, Any]
 
 
 @_friendly
-def clip_illustrate(script_text: str, prompt: str, every: int, style: str, image_model: str,
-                    session: Dict[str, Any],
+def clip_illustrate(script_text: str, every: int, style: str, session: Dict[str, Any],
                     plan: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, str]:
-    """Presentation style: AI illustrations as transparent overlays on the video shots.
+    """Presentation style: transparent cards (text, icons, lines) over the video shots.
 
-    Every N narration blocks get a `![](image){overlay}` line: the renderer composites the
-    picture on top of that shot's clip (slide-in + gentle drift), the video keeps playing
-    underneath. With ``plan`` (the overlay elements designed in the wizard) the picture is
-    generated from that description instead of the narration line. The script stays
-    editable; failures never abort the batch."""
-    from .ai_video import ILLUSTRATION_MODELS, OpenRouterClient, generate_illustration
+    Every N narration blocks get a `![](card.png){overlay}` line: the renderer composites
+    the card on top of that shot's clip (slide-in + gentle drift) while the video keeps
+    playing underneath. Cards are drawn locally from the overlay plan designed in the
+    wizard (title, bullet points, icon concepts); without a plan the narration line
+    becomes the card title. The script stays editable; failures never abort the batch."""
+    from .overlays import render_card
     text = (script_text or "").strip()
     if not text:
         raise ValueError("Build the script first (Select the best clips…).")
     every = max(1, int(every or 1))
-    model = (image_model or "").strip() or ILLUSTRATION_MODELS[0]
-    client = OpenRouterClient()
     workdir = Path(session["dir"]) / "illustrations"
     workdir.mkdir(parents=True, exist_ok=True)
     if plan is None:
@@ -613,31 +611,24 @@ def clip_illustrate(script_text: str, prompt: str, every: int, style: str, image
         narrated += 1
         if narrated % every == 0:
             added += 1
-            designed = plan_by_scene.get(narrated)
-            if designed:
-                context = ("Infographic overlay for this scene: title '%s'; points: %s; "
-                           "icons: %s. Context of the video: %s"
-                           % (designed.get("title", ""),
-                              "; ".join(designed.get("bullets") or []),
-                              ", ".join(designed.get("icons") or []),
-                              (prompt or "").strip()[:200]))
-            else:
-                context = "%s Context of the video: %s" % (stripped, (prompt or "").strip()[:200])
+            item = dict(plan_by_scene.get(narrated) or {"title": stripped[:80],
+                                                        "bullets": [], "icons": []})
             try:
-                path = generate_illustration(client, context, workdir / ("illustration_%02d" % added),
-                                             model=model, style=style)
-            except (ProviderError, ConnectionError) as exc:
-                notes.append("Illustration %d failed: %s" % (added, str(exc)[:140]))
+                path = render_card(item, workdir / ("overlay_%02d" % added), style=style)
+            except ConfigError as exc:
+                raise
+            except Exception as exc:
+                notes.append("Overlay %d failed: %s" % (added, str(exc)[:140]))
                 path = None
             if path is not None:
                 out.append("![](%s){overlay}" % path)
         out.append(line)
     if not added:
-        raise ValueError("No narration shot found to illustrate.")
-    status = ("Added **%d** overlays (model **%s**, style **%s**): transparent infographics "
-              "floating over the clips, one every %d narration shot(s). The video keeps playing "
-              "underneath — run the quick preview to check it."
-              % (added - len(notes), model, style or "none", every))
+        raise ValueError("No narration shot found to overlay.")
+    status = ("Added **%d** overlay cards (style **%s**): text, icons and lines drawn over "
+              "the clips, one every %d narration shot(s). The video keeps playing underneath "
+              "— run the quick preview to check it."
+              % (added - len(notes), style or "Scuro", every))
     for note in notes:
         status += "\n\n⚠️ %s" % note
     return status, "\n".join(out).strip() + "\n"
@@ -971,13 +962,10 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                 with gr.Row():
                     clip_every = gr.Dropdown(choices=["1", "2", "3"], value="2",
                                              label="Overlay every N scenes")
-                    clip_illust_style = gr.Dropdown(choices=list(ILLUSTRATION_STYLES),
-                                                    value="Infografica illustrata",
-                                                    label="Overlay style")
-                    clip_illust_model = gr.Dropdown(choices=ILLUSTRATION_MODELS,
-                                                    value=ILLUSTRATION_MODELS[0],
-                                                    allow_custom_value=True,
-                                                    label="Image model (OpenRouter)")
+                    clip_illust_style = gr.Dropdown(choices=list(CARD_STYLES),
+                                                    value="Scuro",
+                                                    label="Card style (text, icons, lines "
+                                                          "drawn locally — no AI image)")
                 clip_overlays_button = gr.Button("3. Design the overlay elements")
                 clip_overlays_status = gr.Markdown()
                 clip_overlays_table = gr.Dataframe(headers=["Scene", "Title", "Points",
@@ -1110,9 +1098,8 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                              clip_duration, clip_len, session],
                                      outputs=[clip_select_status, clip_script, clip_selected])
             clip_illustrate_button.click(clip_illustrate,
-                                         inputs=[clip_script, clip_prompt, clip_every,
-                                                 clip_illust_style, clip_illust_model,
-                                                 session],
+                                         inputs=[clip_script, clip_every,
+                                                 clip_illust_style, session],
                                          outputs=[clip_illust_status, clip_script])
             clip_preview_button.click(clip_preview,
                                       inputs=[clip_script, clip_vertical, session],

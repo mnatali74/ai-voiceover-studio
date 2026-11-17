@@ -284,56 +284,39 @@ def test_voice_choices_never_crashes(tmp_path):
     assert "choices" in update
 
 
-def test_clip_illustrate_inserts_generated_images(tmp_path, monkeypatch):
-    import voiceover_studio.ai_video as ai_video
+def test_clip_illustrate_draws_cards_from_the_plan(tmp_path):
     from voiceover_studio.webui import clip_illustrate
 
-    def fake_illustration(client, prompt, dest_base, model="", style="", aspect_ratio="16:9"):
-        assert "Vigne al tramonto." in prompt
-        assert "enoturismo" in prompt
-        assert style == "Infografica illustrata"
-        path = Path(str(dest_base) + ".png")
-        path.write_bytes(b"png")
-        return path
-
-    monkeypatch.setattr(ai_video, "generate_illustration", fake_illustration)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     session = new_session(tmp_path)
+    session["overlay_plan"] = [{"scene": 2, "title": "Enoturismo", "bullets": ["4 valli"],
+                                "icons": ["uva"]}]
     script = ("# Marche\n\n![](/tmp/c_01.mp4)\n\nColline infinite.\n\n"
               "![](/tmp/c_02.mp4)\n\nVigne al tramonto.")
-    status, out = clip_illustrate(script, "enoturismo nelle Marche", "2",
-                                  "Infografica illustrata", "recraft/test", session)
-    assert "Added **1** overlays" in status
-    assert out.count("illustration_01.png") == 1
+    status, out = clip_illustrate(script, "2", "Scuro", session)
+    assert "Added **1** overlay cards" in status
     assert "){overlay}" in out
-    assert out.index("illustration_01.png") < out.index("Vigne al tramonto.")
-    assert out.index("illustration_01.png") > out.index("c_02.mp4")
+    card = Path(str(Path(session["dir"]) / "illustrations" / "overlay_01.png"))
+    assert card.is_file() and card.stat().st_size > 0
+    assert out.index("overlay_01.png") < out.index("Vigne al tramonto.")
+    assert out.index("overlay_01.png") > out.index("c_02.mp4")
 
 
-def test_clip_illustrate_every_shot_and_failure_is_not_fatal(tmp_path, monkeypatch):
-    import voiceover_studio.ai_video as ai_video
-    from voiceover_studio.errors import ProviderError
+def test_clip_illustrate_without_plan_uses_the_narration(tmp_path):
     from voiceover_studio.webui import clip_illustrate
 
-    calls = []
-
-    def flaky(client, prompt, dest_base, model="", style="", aspect_ratio="16:9"):
-        calls.append(dest_base)
-        if len(calls) == 1:
-            raise ProviderError("boom")
-        path = Path(str(dest_base) + ".jpg")
-        path.write_bytes(b"jpg")
-        return path
-
-    monkeypatch.setattr(ai_video, "generate_illustration", flaky)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     session = new_session(tmp_path)
     script = "Prima frase.\n\nSeconda frase.\n\nTerza frase."
-    status, out = clip_illustrate(script, "compostaggio", "1", "", "some/model", session)
-    assert len(calls) == 3
-    assert "Illustration 1 failed" in status
-    assert "illustration_02.jpg" in out and "illustration_03.jpg" in out
-    assert out.count("){overlay}") == 2
+    status, out = clip_illustrate(script, "1", "Chiaro", session)
+    assert "Added **3** overlay cards" in status
+    assert out.count("){overlay}") == 3
+    cards = sorted((Path(session["dir"]) / "illustrations").glob("overlay_*.png"))
+    assert len(cards) == 3
+
+
+def test_clip_illustrate_needs_a_script(tmp_path):
+    from voiceover_studio.webui import clip_illustrate
+    with pytest.raises(ValueError):
+        clip_illustrate("", "1", "Scuro", new_session(tmp_path))
 
 
 def test_clip_preview_uses_dummy_and_small_size(tmp_path, monkeypatch):
@@ -477,27 +460,6 @@ def test_reading_time_updates_the_duration_slider(tmp_path):
     md, update = reading_time("One two three four five six seven eight.")
     assert "Reading time" in md
     assert update["value"] >= 15
-
-
-def test_clip_illustrate_uses_the_designed_overlay_plan(tmp_path, monkeypatch):
-    import voiceover_studio.ai_video as ai_video
-    from voiceover_studio.webui import clip_illustrate
-
-    def fake_illustration(client, prompt, dest_base, model="", style="", aspect_ratio="16:9"):
-        assert "Enoturismo" in prompt and "4 valli" in prompt and "uva" in prompt
-        path = Path(str(dest_base) + ".png")
-        path.write_bytes(b"png")
-        return path
-
-    monkeypatch.setattr(ai_video, "generate_illustration", fake_illustration)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
-    session = new_session(tmp_path)
-    session["overlay_plan"] = [{"scene": 2, "title": "Enoturismo", "bullets": ["4 valli"],
-                                "icons": ["uva"]}]
-    script = "![](/tmp/c_01.mp4)\n\nColline infinite.\n\n![](/tmp/c_02.mp4)\n\nVigne al tramonto."
-    status, out = clip_illustrate(script, "enoturismo", "2", "Infografica illustrata",
-                                  "recraft/test", session)
-    assert "Added **1** overlays" in status and "){overlay}" in out
 
 
 def test_clip_render_passes_transitions(tmp_path, monkeypatch):

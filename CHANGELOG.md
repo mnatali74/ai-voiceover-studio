@@ -31,6 +31,13 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **Overlay cards drawn locally: text, icons and lines, not AI images**. The presentation
+  style no longer generates pictures with an image model: the overlay elements designed in
+  the wizard (title, bullet points, icon concepts) are rendered as transparent PNG cards
+  with Pillow — heading, accent line, bullets with vector glyphs (check, arrow, star,
+  alert, dot) and icon chips — composited over the clips while the video keeps playing.
+  Four card styles (Scuro, Chiaro, Blu notte, Carta); without a designed plan the
+  narration line becomes the card title. Fast, free and pixel-precise.
 - **Video wizard: the Clip studio becomes a guided flow**. Step 1 turns the prompt into the
   full narration (the AI also advises whether subtitles are worth it) and sets the target
   duration to the reading time. Step 2 picks the narrator voice. Step 3 describes what each

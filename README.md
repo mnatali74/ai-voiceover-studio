@@ -130,7 +130,8 @@ a time: from your prompt the AI **writes the narration** (and advises whether su
 worth it) and sets the target duration to its **reading time**; you pick the narrator voice;
 the AI describes **what each scene should show** and prefills the search queries; you choose
 the **presentation style** — with the overlay layer on, the AI designs the text and icon
-elements that float over the video; then the matching clips are found, previewed inline and
+elements that float over the video as **transparent cards drawn locally** (text, vector
+icons and accent lines — no AI image generation, precise and free); then the matching clips are found, previewed inline and
 selected (with alternative queries on demand), the transitions between clips are chosen from a
 list, and you get a fast silent **preview** before the final render.
 
