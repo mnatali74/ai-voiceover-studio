@@ -125,7 +125,16 @@ for the scene plan and the vision check.
 
 ## Clip studio: reuse YouTube footage
 
-The *Clip studio* tab turns a prompt into a personal B-roll library. Write what the video is
+The *Video wizard* tab (formerly *Clip studio*) walks you through the whole video, one step at
+a time: from your prompt the AI **writes the narration** (and advises whether subtitles are
+worth it) and sets the target duration to its **reading time**; you pick the narrator voice;
+the AI describes **what each scene should show** and prefills the search queries; you choose
+the **presentation style** — with the overlay layer on, the AI designs the text and icon
+elements that float over the video; then the matching clips are found, previewed inline and
+selected (with alternative queries on demand), the transitions between clips are chosen from a
+list, and you get a fast silent **preview** before the final render.
+
+Write what the video is
 about, and the OpenRouter model suggests several varied search queries (at least five
 different sources, so no single video gets copied) shown in an **editable form** — tune them or
 write your own (hand-written queries need no API key). The search runs on the **selected

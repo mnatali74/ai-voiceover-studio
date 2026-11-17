@@ -27,6 +27,17 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **Video wizard: the Clip studio becomes a guided flow**. Step 1 turns the prompt into the
+  full narration (the AI also advises whether subtitles are worth it) and sets the target
+  duration to the reading time. Step 2 picks the narrator voice. Step 3 describes what each
+  scene should show and prefills the stock-search queries. Step 4 chooses the presentation
+  style: with the overlay layer on, the AI designs the text/icon elements that will float
+  over the video. Step 5 searches the sources (YouTube, Wikimedia Commons, Pixabay) from the
+  scene queries, previews the candidates inline and lets you swap any that do not fit
+  (alternative queries on demand). Step 6 downloads and cuts the audio-free clips into the
+  catalog. Step 7 selects the best clips, writes the script and applies the designed
+  overlays. Step 8 picks the transition between clips from a list. Step 9 renders the fast
+  silent preview and then the final video.
 - **Overlays: infographics on top of the video, not instead of it**: a new script syntax
   `![](picture.png){overlay}` composites a transparent image over the shot's clip — it slides in,
   drifts gently and can carry a real alpha channel (PNG with transparency). The *Add

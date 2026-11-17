@@ -534,14 +534,17 @@ def clip_select(prompt: str, model: str, language: str, video_duration: float,
 
 
 def clip_render(script_text: str, provider: str, language: str, speed: float, voice: str,
-                vertical: bool, style: str, music: str, session: Dict[str, Any]
+                vertical: bool, style: str, music: str, transition_style: str = "mix",
+                transition: float = 0.5, session: Optional[Dict[str, Any]] = None
                 ) -> Tuple[str, Optional[str]]:
-    """Render the clip-based script with the chosen narrator voice."""
+    """Render the clip-based script with the chosen narrator voice and transitions."""
     text = (script_text or "").strip()
     if not text:
         raise ValueError("Select the clips and build the script first.")
     return render_video_clip(text, provider, language, speed, vertical, style, music,
-                             None, session, voice=voice or None)
+                             None, session, voice=voice or None,
+                             transition_style=transition_style,
+                             transition=float(transition))
 
 
 def clip_preview(script_text: str, vertical: bool, session: Dict[str, Any]
@@ -555,12 +558,15 @@ def clip_preview(script_text: str, vertical: bool, session: Dict[str, Any]
 
 
 def clip_illustrate(script_text: str, prompt: str, every: int, style: str, image_model: str,
-                    session: Dict[str, Any]) -> Tuple[str, str]:
+                    session: Dict[str, Any],
+                    plan: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, str]:
     """Presentation style: AI illustrations as transparent overlays on the video shots.
 
     Every N narration blocks get a `![](image){overlay}` line: the renderer composites the
     picture on top of that shot's clip (slide-in + gentle drift), the video keeps playing
-    underneath. The script stays editable; failures never abort the batch."""
+    underneath. With ``plan`` (the overlay elements designed in the wizard) the picture is
+    generated from that description instead of the narration line. The script stays
+    editable; failures never abort the batch."""
     from .ai_video import ILLUSTRATION_MODELS, OpenRouterClient, generate_illustration
     text = (script_text or "").strip()
     if not text:
@@ -570,6 +576,14 @@ def clip_illustrate(script_text: str, prompt: str, every: int, style: str, image
     client = OpenRouterClient()
     workdir = Path(session["dir"]) / "illustrations"
     workdir.mkdir(parents=True, exist_ok=True)
+    if plan is None:
+        plan = session.get("overlay_plan") or []
+    plan_by_scene: Dict[int, Dict[str, Any]] = {}
+    for item in plan:
+        try:
+            plan_by_scene[int(item.get("scene", 0))] = item
+        except (TypeError, ValueError):
+            continue
     out, notes, added, narrated = [], [], 0, 0
     for line in text.splitlines():
         stripped = line.strip()
@@ -579,7 +593,16 @@ def clip_illustrate(script_text: str, prompt: str, every: int, style: str, image
         narrated += 1
         if narrated % every == 0:
             added += 1
-            context = "%s Context of the video: %s" % (stripped, (prompt or "").strip()[:200])
+            designed = plan_by_scene.get(narrated)
+            if designed:
+                context = ("Infographic overlay for this scene: title '%s'; points: %s; "
+                           "icons: %s. Context of the video: %s"
+                           % (designed.get("title", ""),
+                              "; ".join(designed.get("bullets") or []),
+                              ", ".join(designed.get("icons") or []),
+                              (prompt or "").strip()[:200]))
+            else:
+                context = "%s Context of the video: %s" % (stripped, (prompt or "").strip()[:200])
             try:
                 path = generate_illustration(client, context, workdir / ("illustration_%02d" % added),
                                              model=model, style=style)
@@ -598,6 +621,105 @@ def clip_illustrate(script_text: str, prompt: str, every: int, style: str, image
     for note in notes:
         status += "\n\n⚠️ %s" % note
     return status, "\n".join(out).strip() + "\n"
+
+
+def wizard_narrate(prompt: str, model: str, language: str, duration: float,
+                   session: Dict[str, Any]) -> Tuple[str, str, str, Any]:
+    """Step 1: prompt -> narration script + subtitles advice + reading-time duration."""
+    from .ai_video import OpenRouterClient, best_value_models
+    from .clips import estimate_speech_seconds, plan_narration
+    if not (prompt or "").strip():
+        raise ValueError("Write the prompt of the video you want to build.")
+    client = OpenRouterClient()
+    if model in ("", "best value (auto)"):
+        model = best_value_models(client)[0]
+    plan = plan_narration(client, model, prompt, language=language, duration=float(duration))
+    narration = plan["narration"]
+    session["wizard_narration"] = narration
+    reading = estimate_speech_seconds(narration)
+    scenes = len([p for p in narration.split("\n\n") if p.strip()])
+    status = ("Narration written with model **%s**: **%d** scene paragraphs, reading time "
+              "about **%.0f s**. Edit it freely, then move on." % (model, scenes, reading))
+    advice = ("**Subtitles: %s** — %s\n\nChoose the caption style in the last step "
+              "('none' = no captions)." % ("yes" if plan["subtitles"] else "no",
+                                             plan["reason"] or "-"))
+    return status, narration, advice, gr.update(value=float(max(15, min(300, round(reading)))))
+
+
+def reading_time(narration: str) -> Tuple[str, Any]:
+    """Step 2: narration -> reading-time display + target-duration slider update."""
+    from .clips import estimate_speech_seconds
+    reading = estimate_speech_seconds(narration or "")
+    return ("Reading time of the narration: **%.0f s** — by default the video lasts this "
+            "long; move the duration slider in step 1 to stretch or shorten it." % reading), \
+        gr.update(value=float(max(15, min(300, round(reading)))))
+
+
+def wizard_scenes(narration: str, prompt: str, model: str, session: Dict[str, Any]
+                  ) -> Tuple[str, List[List[Any]], str]:
+    """Step 3: narration -> what each scene should show + stock-search queries."""
+    from .ai_video import OpenRouterClient, best_value_models
+    from .clips import plan_scene_queries
+    if not (narration or "").strip():
+        raise ValueError("Write the narration first (step 1).")
+    client = OpenRouterClient()
+    if model in ("", "best value (auto)"):
+        model = best_value_models(client)[0]
+    scenes = plan_scene_queries(client, model, narration, prompt)
+    session["wizard_scenes"] = scenes
+    rows = [[i + 1, s["scene"], s["query"]] for i, s in enumerate(scenes)]
+    queries = "\n".join(s["query"] for s in scenes)
+    return ("**%d** scenes defined with model **%s**. The search queries below are prefilled "
+            "from the scenes — edit them freely before searching." % (len(scenes), model)), \
+        rows, queries
+
+
+def wizard_overlays(narration: str, prompt: str, model: str, session: Dict[str, Any]
+                    ) -> Tuple[str, List[List[Any]]]:
+    """Step 4: narration -> the text/icon elements of the overlay layer (presentation)."""
+    from .ai_video import OpenRouterClient, best_value_models
+    from .clips import plan_overlays
+    if not (narration or "").strip():
+        raise ValueError("Write the narration first (step 1).")
+    client = OpenRouterClient()
+    if model in ("", "best value (auto)"):
+        model = best_value_models(client)[0]
+    overlays = plan_overlays(client, model, narration, prompt)
+    session["overlay_plan"] = overlays
+    rows = [[o["scene"], o["title"], "; ".join(o["bullets"]), ", ".join(o["icons"])]
+            for o in overlays]
+    return ("**%d** overlay elements designed with model **%s**. They become transparent "
+            "infographics over the clips when you run *Add overlays to the script* "
+            "(step 7)." % (len(overlays), model)), rows
+
+
+def set_presentation(choice: str, session: Dict[str, Any]) -> str:
+    """Step 4: keep or drop the overlay plan when the user switches style."""
+    if choice == "yes":
+        return "Presentation style **on**: design the overlay elements below, then apply " \
+            "them in step 7."
+    session.pop("overlay_plan", None)
+    return "Presentation style **off**: no overlay layer, plain video with (optional) " \
+        "captions."
+
+
+def wizard_more_queries(prompt: str, model: str, sources: int, queries: str,
+                        session: Dict[str, Any]) -> Tuple[str, str]:
+    """Step 5: append fresh alternative queries for candidates the user does not like."""
+    from .ai_video import OpenRouterClient, best_value_models
+    from .clips import suggest_searches
+    if not (prompt or "").strip():
+        raise ValueError("Write the prompt of the video you want to build.")
+    client = OpenRouterClient()
+    if model in ("", "best value (auto)"):
+        model = best_value_models(client)[0]
+    existing = [q.strip() for q in (queries or "").splitlines() if q.strip()]
+    fresh = suggest_searches(client, model, prompt, n=int(sources))
+    added = [q for q in fresh if q.lower() not in {e.lower() for e in existing}]
+    if not added:
+        return "The model returned no new queries — edit the list manually.", queries
+    return ("Added **%d** alternative queries with model **%s**. Search again to see new "
+            "candidates." % (len(added), model)), "\n".join(existing + added)
 
 
 def voice_choices(provider: str) -> Any:
@@ -772,140 +894,200 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                            ai_style, ai_music, session],
                                    outputs=[ai_video_status, ai_video_out])
 
-        with gr.Tab("Clip studio"):
-            gr.Markdown("Describe the video you are building: the model suggests varied YouTube "
-                        "search queries (**editable below**, or write your own — searching with "
-                        "your own queries needs no API key), you **preview the candidates right "
-                        "here without downloading**, select the ones you like, and the studio "
-                        "downloads them, picks the highlight segments, and cuts **audio-free** "
-                        "clips plus still frames to reuse as B-roll in the **Video** tab. "
-                        "Needs `OPENROUTER_API_KEY`, [yt-dlp](https://github.com/yt-dlp/yt-dlp) "
+        with gr.Tab("Video wizard"):
+            gr.Markdown("Guided flow, one step at a time: the AI writes the narration from "
+                        "your prompt, you pick the voice (the video duration follows the "
+                        "reading time), the AI describes what each scene should show, you "
+                        "choose the presentation style (with or without a transparent overlay "
+                        "layer), the matching clips are found, previewed and selected, you "
+                        "pick the transitions, and finally you get a fast preview and the "
+                        "final render. Needs `OPENROUTER_API_KEY`, "
+                        "[yt-dlp](https://github.com/yt-dlp/yt-dlp) "
                         "(`pip install \"ai-voiceover-studio[clip]\"`), a JavaScript runtime "
                         "(deno) and ffmpeg.")
-            clip_prompt = gr.Textbox(label="Prompt of the video to build", lines=2,
-                                     placeholder="Es.: video promozionale sull'enoturismo nelle "
-                                                 "Marche, stile documentaristico")
-            clip_duration = gr.Slider(15, 300, value=60, step=5,
-                                      label="Final video duration (s) — target reading time of "
-                                            "the narrations; estimates how many clips and "
-                                            "sources are needed and stops the batch when enough "
-                                            "are collected")
-            with gr.Row():
+            with gr.Accordion("Step 1 — Prompt and narration", open=True):
+                clip_prompt = gr.Textbox(label="Prompt of the video to build", lines=2,
+                                         placeholder="Es.: video promozionale sull'enoturismo "
+                                                     "nelle Marche, stile documentaristico")
+                with gr.Row():
+                    clip_language = gr.Dropdown(choices=LANGUAGES, value="auto",
+                                                label="Language")
+                    clip_duration = gr.Slider(15, 300, value=60, step=5,
+                                              label="Target duration (s) — set to the "
+                                                    "narration reading time after step 1; "
+                                                    "move it to stretch or shorten the video")
                 clip_model = gr.Dropdown(choices=["best value (auto)"] + DEFAULT_MODELS,
                                          value="best value (auto)", allow_custom_value=True,
                                          label="Model (OpenRouter) — 'best value' picks the "
                                                "cheapest capable model")
-                clip_sources = gr.Slider(3, 10, value=5, step=1,
-                                         label="Video sources to search (min 3)")
-            with gr.Row():
-                clip_stock = gr.CheckboxGroup(choices=["YouTube", "Wikimedia Commons", "Pixabay"],
-                                              value=["YouTube", "Wikimedia Commons"],
-                                              label="Sources to search (Commons is keyless and "
-                                                    "has precise descriptions, no bot checks)")
-                clip_pixabay = gr.Textbox(label="Pixabay API key (optional) — free, shown at the "
-                                                "top of pixabay.com/api/docs/ when logged in",
-                                          value="", lines=1)
-            clip_cookies = gr.Textbox(label="Cookies file (optional) — path to a cookies.txt "
-                                            "export, needed when YouTube asks to sign in",
-                                      value="", lines=1,
-                                      placeholder="/percorso/cookies.txt")
-            clip_suggest_button = gr.Button("Suggest search queries from the prompt")
-            clip_suggest_status = gr.Markdown()
-            clip_queries = gr.Textbox(label="Search queries (one per line, editable)", lines=5,
-                                      placeholder="Leave empty to let the model search for you, "
-                                                  "or write your own queries here")
-            clip_search_button = gr.Button("Search YouTube with these queries", variant="primary")
-            clip_search_status = gr.Markdown()
-            clip_results = gr.Dataframe(headers=["#", "Title", "Channel", "Search"],
-                                        label="Candidate videos")
-            clip_previews = gr.HTML()
-            clip_pick = gr.CheckboxGroup(choices=[], label="Select the videos to download "
-                                                          "and cut", value=[])
-            with gr.Row():
-                clip_all = gr.Checkbox(value=True, label="Extract every highlight (recommended)")
-                clip_n = gr.Slider(1, 6, value=2, step=1, label="…or this many clips per video")
-                clip_len = gr.Slider(5, 30, value=10, step=1, label="Clip length (s)")
-                clip_delay = gr.Slider(0, 30, value=10, step=1,
-                                       label="Pause between YouTube requests (s, rate-limit protection)")
-            clip_stills = gr.Checkbox(value=True, label="Also extract still frames from the clips")
-            clip_manual = gr.Textbox(label="Or paste YouTube links manually (optional)", lines=2,
-                                     placeholder="https://www.youtube.com/watch?v=...")
-            clip_button = gr.Button("Download selected videos, extract and classify all clips",
-                                    variant="primary")
-            clip_status = gr.Markdown()
-            with gr.Row():
-                clip_files = gr.Files(label="Cut clips — audio-free (reuse them as B-roll)")
-                clip_frames = gr.Gallery(label="Extracted frames", columns=6, height=260)
-            clip_catalog = gr.Dataframe(headers=["Clip", "Source", "Description", "Tags"],
-                                        label="Clip catalog (database, saved on disk)")
+                clip_narrate_button = gr.Button("1. Write the narration", variant="primary")
+                clip_narrate_status = gr.Markdown()
+                clip_narration = gr.Textbox(label="Narration (editable, one paragraph per "
+                                                  "scene)", lines=8)
+                clip_subtitles = gr.Markdown()
+            with gr.Accordion("Step 2 — Voice and duration", open=False):
+                with gr.Row():
+                    clip_voice = gr.Dropdown(choices=[], label="Narrator voice",
+                                             allow_custom_value=True)
+                    clip_voices_button = gr.Button("Load voices")
+                clip_reading = gr.Markdown()
+            with gr.Accordion("Step 3 — Scenes", open=False):
+                clip_scenes_button = gr.Button("2. Define what each scene shows",
+                                               variant="primary")
+                clip_scenes_status = gr.Markdown()
+                clip_scenes_table = gr.Dataframe(headers=["#", "Scene", "Search query"],
+                                                 label="Scene plan")
+            with gr.Accordion("Step 4 — Presentation style (overlay layer)", open=False):
+                clip_presentation = gr.Radio(choices=["no", "yes"], value="no",
+                                             label="Overlay layer with elements that explain "
+                                                   "better (text and icons floating over the "
+                                                   "video)?")
+                clip_presentation_status = gr.Markdown()
+                with gr.Row():
+                    clip_every = gr.Dropdown(choices=["1", "2", "3"], value="2",
+                                             label="Overlay every N scenes")
+                    clip_illust_style = gr.Dropdown(choices=list(ILLUSTRATION_STYLES),
+                                                    value="Infografica illustrata",
+                                                    label="Overlay style")
+                    clip_illust_model = gr.Dropdown(choices=ILLUSTRATION_MODELS,
+                                                    value=ILLUSTRATION_MODELS[0],
+                                                    allow_custom_value=True,
+                                                    label="Image model (OpenRouter)")
+                clip_overlays_button = gr.Button("3. Design the overlay elements")
+                clip_overlays_status = gr.Markdown()
+                clip_overlays_table = gr.Dataframe(headers=["Scene", "Title", "Points",
+                                                            "Icons"],
+                                                   label="Overlay elements (presentation "
+                                                         "layer)")
+            with gr.Accordion("Step 5 — Find the clips", open=False):
+                with gr.Row():
+                    clip_stock = gr.CheckboxGroup(choices=["YouTube", "Wikimedia Commons",
+                                                           "Pixabay"],
+                                                  value=["YouTube", "Wikimedia Commons"],
+                                                  label="Sources to search (Commons is "
+                                                        "keyless and has precise descriptions, "
+                                                        "no bot checks)")
+                    clip_pixabay = gr.Textbox(label="Pixabay API key (optional) — free, shown "
+                                                    "at the top of pixabay.com/api/docs/ when "
+                                                    "logged in", value="", lines=1)
+                clip_cookies = gr.Textbox(label="Cookies file (optional) — path to a "
+                                                "cookies.txt export, needed when YouTube asks "
+                                                "to sign in", value="", lines=1,
+                                          placeholder="/percorso/cookies.txt")
+                clip_sources_number = gr.Slider(3, 10, value=5, step=1,
+                                                label="Video sources to search (min 3)")
+                clip_queries = gr.Textbox(label="Search queries (one per line, prefilled from "
+                                                "the scenes, editable)", lines=5)
+                with gr.Row():
+                    clip_search_button = gr.Button("4. Search the sources", variant="primary")
+                    clip_more_button = gr.Button("Suggest alternative queries")
+                clip_search_status = gr.Markdown()
+                clip_results = gr.Dataframe(headers=["#", "Title", "Channel", "Search"],
+                                            label="Candidate videos")
+                clip_previews = gr.HTML()
+                clip_pick = gr.CheckboxGroup(choices=[], label="Select the videos to download "
+                                                              "and cut (swap any that do not "
+                                                              "look right before continuing)",
+                                             value=[])
+            with gr.Accordion("Step 6 — Download and cut", open=False):
+                with gr.Row():
+                    clip_all = gr.Checkbox(value=True,
+                                           label="Extract every highlight (recommended)")
+                    clip_n = gr.Slider(1, 6, value=2, step=1,
+                                       label="…or this many clips per video")
+                    clip_len = gr.Slider(5, 30, value=10, step=1, label="Clip length (s)")
+                    clip_delay = gr.Slider(0, 30, value=10, step=1,
+                                           label="Pause between YouTube requests (s, "
+                                                 "rate-limit protection)")
+                clip_stills = gr.Checkbox(value=True,
+                                          label="Also extract still frames from the clips")
+                clip_manual = gr.Textbox(label="Or paste video links manually (optional)",
+                                         lines=2,
+                                         placeholder="https://www.youtube.com/watch?v=...")
+                clip_button = gr.Button("5. Download selected videos, extract and classify "
+                                        "all clips", variant="primary")
+                clip_status = gr.Markdown()
+                with gr.Row():
+                    clip_files = gr.Files(label="Cut clips — audio-free (reuse them as B-roll)")
+                    clip_frames = gr.Gallery(label="Extracted frames", columns=6, height=260)
+                clip_catalog = gr.Dataframe(headers=["Clip", "Source", "Description", "Tags"],
+                                            label="Clip catalog (database, saved on disk)")
+            with gr.Accordion("Step 7 — Selection, script and overlays", open=False):
+                clip_select_button = gr.Button("6. Select the best clips and write the "
+                                               "script", variant="primary")
+                clip_select_status = gr.Markdown()
+                clip_script = gr.Textbox(label="Final script (editable)", lines=8)
+                clip_selected = gr.Dataframe(headers=["Clip", "Description", "Narration"],
+                                             label="Chosen shots")
+                clip_illustrate_button = gr.Button("7. Add overlays to the script "
+                                                   "(presentation style)")
+                clip_illust_status = gr.Markdown()
+            with gr.Accordion("Step 8 — Transitions", open=False):
+                clip_transition = gr.Radio(choices=["mix", "fade", "slide", "zoom", "cut"],
+                                           value="mix",
+                                           label="Animation between one clip and the next")
+                clip_transition_time = gr.Slider(0, 1.5, value=0.5, step=0.1,
+                                                 label="Transition duration (s)")
+            with gr.Accordion("Step 9 — Preview and final video", open=False):
+                with gr.Row():
+                    clip_vertical = gr.Checkbox(value=False, label="Vertical 9:16")
+                    clip_style = gr.Dropdown(choices=["auto", "tiktok", "bold", "clean",
+                                                      "minimal", "box", "none"],
+                                             value="auto",
+                                             label="Caption style ('none' = no captions)")
+                    clip_music = gr.Dropdown(choices=["", "ambient", "pulse"], value="ambient",
+                                             label="Background music")
+                clip_preview_button = gr.Button("8. Quick preview (silent, fast, low "
+                                                "resolution)")
+                clip_preview_status = gr.Markdown()
+                clip_preview_out = gr.Video(label="Preview draft")
+                clip_render_button = gr.Button("9. Render final video", variant="primary")
+                clip_video_status = gr.Markdown()
+                clip_video_out = gr.Video(label="Final video")
 
-            gr.Markdown("### Final video\nPick the narrator voice, then let the model choose the "
-                        "best clips from the catalog and build the video.")
-            with gr.Row():
-                clip_voice = gr.Dropdown(choices=[], label="Narrator voice", allow_custom_value=True)
-                clip_voices_button = gr.Button("Load voices")
-                clip_language = gr.Dropdown(choices=LANGUAGES, value="auto", label="Language")
-            with gr.Row():
-                clip_vertical = gr.Checkbox(value=False, label="Vertical 9:16")
-                clip_style = gr.Dropdown(choices=["auto", "tiktok", "bold", "clean", "minimal",
-                                                  "box", "none"], value="auto",
-                                         label="Caption style ('none' = no captions)")
-                clip_music = gr.Dropdown(choices=["", "ambient", "pulse"], value="ambient",
-                                         label="Background music")
-            clip_auto_duration = gr.Checkbox(
-                value=True,
-                label="Match the video duration to the narration reading time (default) — "
-                      "the narrations are written to read in about the target duration; "
-                      "move the slider to stretch or shorten the video")
-            clip_select_button = gr.Button("Select the best clips and write the script",
-                                           variant="primary")
-            clip_select_status = gr.Markdown()
-            clip_script = gr.Textbox(label="Final script (editable)", lines=8)
-            clip_selected = gr.Dataframe(headers=["Clip", "Description", "Narration"],
-                                         label="Chosen shots")
-            with gr.Row():
-                clip_every = gr.Dropdown(choices=["1", "2", "3"], value="2",
-                                         label="Illustration every N narration shots")
-                clip_illust_style = gr.Dropdown(choices=list(ILLUSTRATION_STYLES),
-                                                value="Infografica illustrata",
-                                                label="Illustration style (presentation)")
-                clip_illust_model = gr.Dropdown(choices=ILLUSTRATION_MODELS,
-                                                value=ILLUSTRATION_MODELS[0],
-                                                allow_custom_value=True,
-                                                label="Image model (OpenRouter)")
-            clip_illustrate_button = gr.Button("Add illustrations to the script "
-                                               "(presentation style)")
-            clip_illust_status = gr.Markdown()
-            clip_preview_button = gr.Button("Quick preview (silent, fast, low resolution)")
-            clip_preview_status = gr.Markdown()
-            clip_preview_out = gr.Video(label="Preview draft")
-            clip_render_button = gr.Button("Render final video", variant="primary")
-            clip_video_status = gr.Markdown()
-            clip_video_out = gr.Video(label="Final video")
-
-            clip_suggest_button.click(clip_suggest,
-                                      inputs=[clip_prompt, clip_model, clip_sources, session],
-                                      outputs=[clip_suggest_status, clip_queries])
+            clip_narrate_button.click(wizard_narrate,
+                                      inputs=[clip_prompt, clip_model, clip_language,
+                                              clip_duration, session],
+                                      outputs=[clip_narrate_status, clip_narration,
+                                               clip_subtitles, clip_duration])
+            clip_narration.change(reading_time, inputs=clip_narration,
+                                  outputs=[clip_reading, clip_duration])
+            clip_voices_button.click(voice_choices, inputs=[provider], outputs=[clip_voice])
+            clip_scenes_button.click(wizard_scenes,
+                                     inputs=[clip_narration, clip_prompt, clip_model, session],
+                                     outputs=[clip_scenes_status, clip_scenes_table,
+                                              clip_queries])
+            clip_presentation.change(set_presentation,
+                                     inputs=[clip_presentation, session],
+                                     outputs=[clip_presentation_status])
+            clip_overlays_button.click(wizard_overlays,
+                                       inputs=[clip_narration, clip_prompt, clip_model,
+                                               session],
+                                       outputs=[clip_overlays_status, clip_overlays_table])
+            clip_more_button.click(wizard_more_queries,
+                                   inputs=[clip_prompt, clip_model, clip_sources_number,
+                                           clip_queries, session],
+                                   outputs=[clip_search_status, clip_queries])
             clip_search_button.click(clip_search,
-                                     inputs=[clip_prompt, clip_model, clip_sources,
+                                     inputs=[clip_prompt, clip_model, clip_sources_number,
                                              clip_queries, clip_cookies, clip_stock,
                                              clip_pixabay, session],
                                      outputs=[clip_search_status, clip_results, clip_previews,
                                               clip_pick])
             clip_button.click(clip_build,
                               inputs=[clip_pick, clip_manual, clip_model, clip_all, clip_n,
-                                      clip_len, clip_stills, clip_delay, clip_duration, session],
+                                      clip_len, clip_stills, clip_delay, clip_duration,
+                                      session],
                               outputs=[clip_status, clip_files, clip_frames, clip_catalog,
                                        library_pick])
-            clip_voices_button.click(voice_choices, inputs=[provider], outputs=[clip_voice])
             clip_select_button.click(clip_select,
                                      inputs=[clip_prompt, clip_model, clip_language,
-                                             clip_duration, clip_len, session,
-                                             clip_auto_duration],
+                                             clip_duration, clip_len, session],
                                      outputs=[clip_select_status, clip_script, clip_selected])
             clip_illustrate_button.click(clip_illustrate,
                                          inputs=[clip_script, clip_prompt, clip_every,
-                                                 clip_illust_style, clip_illust_model, session],
+                                                 clip_illust_style, clip_illust_model,
+                                                 session],
                                          outputs=[clip_illust_status, clip_script])
             clip_preview_button.click(clip_preview,
                                       inputs=[clip_script, clip_vertical, session],
@@ -913,7 +1095,7 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
             clip_render_button.click(clip_render,
                                      inputs=[clip_script, provider, clip_language, speed,
                                              clip_voice, clip_vertical, clip_style, clip_music,
-                                             session],
+                                             clip_transition, clip_transition_time, session],
                                      outputs=[clip_video_status, clip_video_out])
 
     return app

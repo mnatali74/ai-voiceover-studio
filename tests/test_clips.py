@@ -724,3 +724,66 @@ def test_select_clips_passes_pacing_budget(fake):
     select_clips(client2, "m", "enoturismo", catalog, max_shots=6)
     body = json.loads(fake.calls[-1]["body"])
     assert "reading time" not in body["messages"][0]["content"]
+
+
+NARRATION_JSON = ('{"narration": "Prima scena.\\n\\nSeconda scena.", "subtitles": true, '
+                  '"reason": "video didattico"}')
+SCENES_JSON = ('[{"scene": "Colline al tramonto dall\'alto", "query": "aerial vineyards sunset"}, '
+               '{"scene": "Barili in cantina", "query": "wine cellar barrels"}]')
+OVERLAYS_JSON = ('[{"scene": 1, "title": "Enoturismo", "bullets": ["4 valli", "12 strade del '
+                 'Sacred Monte"], "icons": ["uva", "calice"]}, '
+                 '{"scene": 9, "title": "out of range", "bullets": [], "icons": []}]')
+
+
+def test_plan_narration_returns_script_and_subtitles(fake):
+    from voiceover_studio.clips import plan_narration
+    client = chat_client(fake, NARRATION_JSON)
+    plan = plan_narration(client, "m", "enoturismo nelle Marche", language="it", duration=30.0)
+    assert plan["narration"].startswith("Prima scena.")
+    assert plan["subtitles"] is True
+    assert "didattico" in plan["reason"]
+
+
+def test_plan_narration_needs_a_prompt(fake):
+    from voiceover_studio.clips import plan_narration
+    client = chat_client(fake, NARRATION_JSON)
+    with pytest.raises(ValueError):
+        plan_narration(client, "m", "   ")
+
+
+def test_plan_scene_queries_matches_paragraphs(fake):
+    from voiceover_studio.clips import plan_scene_queries
+    client = chat_client(fake, SCENES_JSON)
+    scenes = plan_scene_queries(client, "m", "Prima scena.\n\nSeconda scena.", "enoturismo")
+    assert [s["query"] for s in scenes] == ["aerial vineyards sunset", "wine cellar barrels"]
+    assert "enoturismo" in fake.calls[-1]["body"].decode()
+
+
+def test_plan_scene_queries_pads_missing_scenes(fake):
+    from voiceover_studio.clips import plan_scene_queries
+    client = chat_client(fake, '[{"scene": "solo una", "query": "one query"}]')
+    scenes = plan_scene_queries(client, "m", "Prima.\n\nSeconda.\n\nTerza.")
+    assert len(scenes) == 3 and scenes[1]["query"]
+
+
+def test_plan_scene_queries_needs_narration(fake):
+    from voiceover_studio.clips import plan_scene_queries
+    client = chat_client(fake, SCENES_JSON)
+    with pytest.raises(ValueError):
+        plan_scene_queries(client, "m", "")
+
+
+def test_plan_overlays_filters_invalid_scenes(fake):
+    from voiceover_studio.clips import plan_overlays
+    client = chat_client(fake, OVERLAYS_JSON)
+    overlays = plan_overlays(client, "m", "Prima scena.\n\nSeconda scena.")
+    assert len(overlays) == 1
+    assert overlays[0]["scene"] == 1 and overlays[0]["title"] == "Enoturismo"
+    assert overlays[0]["bullets"] and overlays[0]["icons"] == ["uva", "calice"]
+
+
+def test_plan_overlays_needs_valid_json(fake):
+    from voiceover_studio.clips import plan_overlays
+    client = chat_client(fake, '{"not": "a list"}')
+    with pytest.raises(ConfigError):
+        plan_overlays(client, "m", "Prima scena.")

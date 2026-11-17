@@ -134,6 +134,125 @@ def suggest_searches(client: Any, model: str, prompt: str, n: int = 5) -> List[s
     return queries
 
 
+NARRATION_SYSTEM = (
+    "You are a documentary narrator. The user describes the video they want. Respond with "
+    "ONLY a JSON object, no markdown fences:\n"
+    '{{"narration": "the complete voice-over script in {language}, one short paragraph per '
+    'scene, paragraphs separated by a blank line, no markdown and no speaker tags", '
+    '"subtitles": true or false, '
+    '"reason": "one short sentence saying why subtitles help this video or not"}}\n'
+    "Hook first, then the story, then a closing line."
+    "{duration_hint}"
+)
+
+SCENE_SYSTEM = (
+    "You are a stock-footage art director. The user gives the narration of a video, one "
+    "paragraph per scene. Respond with ONLY a JSON array with exactly one item per paragraph, "
+    "no markdown fences:\n"
+    '[{{"scene": "what the viewer should see in this scene, 1-2 concrete sentences", '
+    '"query": "3-6 simple English keywords for a stock footage search"}}]\n'
+    "Keep the scene order. Favor landscapes, aerial and drone shots, nature, cityscapes, "
+    "close-ups of objects and places; avoid people as the subject."
+)
+
+OVERLAY_SYSTEM = (
+    "You design transparent infographic overlays for a narrated video in presentation style. "
+    "The user gives the narration, one paragraph per scene. Respond with ONLY a JSON array, "
+    "no markdown fences, one item for each scene that benefits from an overlay:\n"
+    '[{{"scene": <1-based scene number>, "title": "very short heading", '
+    '"bullets": ["2-4 very short key points"], "icons": ["1-3 simple icon concepts"]}}]\n'
+    "Keep the text minimal and instantly readable; skip scenes where an overlay adds nothing."
+)
+
+
+def plan_narration(client: Any, model: str, prompt: str, language: str = "auto",
+                   duration: float = 0.0) -> Dict[str, Any]:
+    """Video prompt -> {narration, subtitles, reason}: the voice-over script and whether
+    captions are recommended."""
+    from .ai_video import _parse_json
+    prompt = (prompt or "").strip()
+    if not prompt:
+        raise ValueError("Write the prompt of the video you want to build.")
+    lang = "the same language as the prompt" if language in ("", "auto") else language
+    hint = ""
+    if duration and duration > 0:
+        hint = (" The whole script must read in about %d seconds (about %d spoken words)."
+                % (round(duration), round(duration * WORDS_PER_SECOND)))
+    content = client.chat(model, [
+        {"role": "system", "content": NARRATION_SYSTEM.format(language=lang,
+                                                              duration_hint=hint)},
+        {"role": "user", "content": prompt}])
+    data = _parse_json(content)
+    if not isinstance(data, dict) or not str(data.get("narration", "")).strip():
+        raise ConfigError("The model did not return a narration.")
+    return {"narration": str(data["narration"]).strip(),
+            "subtitles": bool(data.get("subtitles")),
+            "reason": str(data.get("reason", ""))[:200]}
+
+
+def plan_scene_queries(client: Any, model: str, narration: str,
+                       prompt: str = "") -> List[Dict[str, str]]:
+    """Narration (one paragraph per scene) -> [{scene, query}] for the stock search."""
+    from .ai_video import _parse_json
+    paragraphs = [p.strip() for p in (narration or "").split("\n\n")
+                  if p.strip() and not p.strip().startswith("#")]
+    if not paragraphs:
+        raise ValueError("Write the narration first (step 1).")
+    user = ("Context of the video: %s\n\n" % prompt.strip() if (prompt or "").strip() else "") \
+        + "\n\n".join(paragraphs)
+    content = client.chat(model, [{"role": "system", "content": SCENE_SYSTEM},
+                                  {"role": "user", "content": user}])
+    raw = _parse_json(content)
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError("The model did not return the scenes.")
+    scenes = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        scenes.append({"scene": str(item.get("scene", "")).strip()[:300],
+                       "query": str(item.get("query", "")).strip() or prompt[:60]})
+    if not scenes:
+        raise ConfigError("The model returned scenes without descriptions.")
+    while len(scenes) < len(paragraphs):
+        fallback = paragraphs[len(scenes)]
+        scenes.append({"scene": fallback[:200], "query": prompt[:60] or fallback[:60]})
+    return scenes[:len(paragraphs)]
+
+
+def plan_overlays(client: Any, model: str, narration: str,
+                  prompt: str = "") -> List[Dict[str, Any]]:
+    """Narration -> overlay element plan: title, bullet points and icons per scene."""
+    from .ai_video import _parse_json
+    paragraphs = [p.strip() for p in (narration or "").split("\n\n")
+                  if p.strip() and not p.strip().startswith("#")]
+    if not paragraphs:
+        raise ValueError("Write the narration first (step 1).")
+    user = ("Context of the video: %s\n\n" % prompt.strip() if (prompt or "").strip() else "") \
+        + "\n\n".join("%d. %s" % (i, p) for i, p in enumerate(paragraphs, 1))
+    content = client.chat(model, [{"role": "system", "content": OVERLAY_SYSTEM},
+                                  {"role": "user", "content": user}])
+    raw = _parse_json(content)
+    if not isinstance(raw, list):
+        raise ConfigError("The model did not return the overlay plan.")
+    overlays = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            scene = int(item.get("scene", 0))
+        except (TypeError, ValueError):
+            continue
+        if scene < 1 or scene > len(paragraphs):
+            continue
+        overlays.append({"scene": scene,
+                         "title": str(item.get("title", ""))[:120],
+                         "bullets": [str(b)[:120] for b in (item.get("bullets") or [])][:4],
+                         "icons": [str(i)[:60] for i in (item.get("icons") or [])][:3]})
+    if not overlays:
+        raise ConfigError("The model returned no overlay elements.")
+    return overlays
+
+
 def search_youtube(query: str, limit: int = 4,
                    cookies: Optional[str] = None) -> List[Dict[str, Any]]:
     """Search YouTube (no download) and return candidate videos without people-focused titles."""

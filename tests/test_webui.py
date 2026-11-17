@@ -1,4 +1,5 @@
 """Offline tests for the Gradio web studio (skipped when gradio is not installed)."""
+import json
 import time
 from pathlib import Path
 
@@ -403,3 +404,114 @@ def test_clip_suggest_falls_back_to_default_model(tmp_path, monkeypatch):
     status, queries = clip_suggest("enoturismo", "best value (auto)", 5, session)
     assert "fallback from broken/model" in status
     assert queries == "hills aerial\nwine cellar"
+
+
+class _FakeWizardClient:
+    """Stands in for OpenRouterClient; answers by the system prompt of each wizard step."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def chat(self, model, messages, max_tokens=None):
+        system = messages[0]["content"]
+        if "documentary narrator" in system:
+            return json.dumps({"narration": "Prima scena.\n\nSeconda scena.",
+                               "subtitles": True, "reason": "video didattico"})
+        if "art director" in system:
+            return json.dumps([{"scene": "Colline al tramonto", "query": "aerial vineyards"},
+                               {"scene": "Barili in cantina", "query": "wine cellar"}])
+        if "infographic overlays" in system:
+            return json.dumps([{"scene": 1, "title": "Enoturismo",
+                                "bullets": ["4 valli"], "icons": ["uva"]}])
+        raise AssertionError("unexpected system prompt: %s" % system[:60])
+
+
+@pytest.fixture
+def wizard_env(monkeypatch):
+    import voiceover_studio.ai_video as ai_video
+    monkeypatch.setattr(ai_video, "OpenRouterClient", _FakeWizardClient)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+
+
+def test_wizard_narrate_writes_narration_and_duration(tmp_path, wizard_env):
+    from voiceover_studio.webui import wizard_narrate
+    session = new_session(tmp_path)
+    status, narration, advice, update = wizard_narrate("enoturismo nelle Marche", "m", "it",
+                                                       60.0, session)
+    assert "reading time" in status
+    assert narration == "Prima scena.\n\nSeconda scena."
+    assert session["wizard_narration"] == narration
+    assert "Subtitles: yes" in advice
+    assert update["value"] >= 15
+
+
+def test_wizard_scenes_prefill_the_queries(tmp_path, wizard_env):
+    from voiceover_studio.webui import wizard_scenes
+    session = new_session(tmp_path)
+    status, rows, queries = wizard_scenes("Prima scena.\n\nSeconda scena.",
+                                          "enoturismo", "m", session)
+    assert len(rows) == 2 and rows[0][2] == "aerial vineyards"
+    assert queries == "aerial vineyards\nwine cellar"
+    assert session["wizard_scenes"][0]["query"] == "aerial vineyards"
+
+
+def test_wizard_scenes_need_the_narration(tmp_path, wizard_env):
+    from voiceover_studio.webui import wizard_scenes
+    with pytest.raises(ValueError):
+        wizard_scenes("", "enoturismo", "m", new_session(tmp_path))
+
+
+def test_wizard_overlays_and_presentation_toggle(tmp_path, wizard_env):
+    from voiceover_studio.webui import set_presentation, wizard_overlays
+    session = new_session(tmp_path)
+    assert "off" in set_presentation("no", session)
+    status, rows = wizard_overlays("Prima scena.\n\nSeconda scena.", "enoturismo", "m", session)
+    assert len(rows) == 1 and rows[0][1] == "Enoturismo"
+    assert session["overlay_plan"][0]["icons"] == ["uva"]
+    set_presentation("no", session)
+    assert "overlay_plan" not in session
+
+
+def test_reading_time_updates_the_duration_slider(tmp_path):
+    from voiceover_studio.webui import reading_time
+    md, update = reading_time("One two three four five six seven eight.")
+    assert "Reading time" in md
+    assert update["value"] >= 15
+
+
+def test_clip_illustrate_uses_the_designed_overlay_plan(tmp_path, monkeypatch):
+    import voiceover_studio.ai_video as ai_video
+    from voiceover_studio.webui import clip_illustrate
+
+    def fake_illustration(client, prompt, dest_base, model="", style="", aspect_ratio="16:9"):
+        assert "Enoturismo" in prompt and "4 valli" in prompt and "uva" in prompt
+        path = Path(str(dest_base) + ".png")
+        path.write_bytes(b"png")
+        return path
+
+    monkeypatch.setattr(ai_video, "generate_illustration", fake_illustration)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    session["overlay_plan"] = [{"scene": 2, "title": "Enoturismo", "bullets": ["4 valli"],
+                                "icons": ["uva"]}]
+    script = "![](/tmp/c_01.mp4)\n\nColline infinite.\n\n![](/tmp/c_02.mp4)\n\nVigne al tramonto."
+    status, out = clip_illustrate(script, "enoturismo", "2", "Infografica illustrata",
+                                  "recraft/test", session)
+    assert "Added **1** overlays" in status and "){overlay}" in out
+
+
+def test_clip_render_passes_transitions(tmp_path, monkeypatch):
+    import voiceover_studio.webui as webui
+    from voiceover_studio.webui import clip_render
+
+    calls = {}
+
+    def fake_render(script, provider_, language, speed, vertical, style, music, broll, session,
+                    **kwargs):
+        calls.update(kwargs)
+        return "ok", "video.mp4"
+
+    monkeypatch.setattr(webui, "render_video_clip", fake_render)
+    status, out = clip_render("# T\n\nTesto.", "dummy", "auto", 1.0, "", False, "auto", "",
+                              "zoom", 0.8, new_session(tmp_path))
+    assert calls["transition_style"] == "zoom" and calls["transition"] == 0.8
