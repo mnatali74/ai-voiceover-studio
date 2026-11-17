@@ -517,12 +517,14 @@ def clip_catalog_rows(session: Dict[str, Any]) -> List[List[Any]]:
 
 @_friendly
 def clip_select(prompt: str, model: str, language: str, video_duration: float,
-                clip_seconds: float, session: Dict[str, Any],
+                clip_seconds: float, session: Dict[str, Any], narration: str = "",
                 match_narration: bool = True) -> Tuple[str, str, List[List[Any]]]:
     """Prompt + clip catalog -> the model picks the best clips and writes the script.
 
-    With ``match_narration`` (default) the narrations are written to read in about the
-    target duration, so the video lasts about as long as its reading time."""
+    With a narration (the step-1 script, editable) the model only pairs each paragraph with
+    the best clip and the text is used exactly as written. Without a narration the model
+    also writes one spoken sentence per shot; with ``match_narration`` those are written to
+    read in about the target duration."""
     from .ai_video import OpenRouterClient, best_value_models
     from .clips import (build_video_script, estimate_needs, estimate_speech_seconds,
                         load_catalog, select_clips)
@@ -534,6 +536,24 @@ def clip_select(prompt: str, model: str, language: str, video_duration: float,
         model = best_value_models(client)[0]
     lang = "the same language as the prompt" if language in ("", "auto") else language
     shots, _ = estimate_needs(float(video_duration), float(clip_seconds))
+    narration = (narration or session.get("wizard_narration") or "").strip()
+    if narration:
+        selected = select_clips(client, model, prompt, catalog, language=lang,
+                                max_shots=shots, narration=narration)
+        script = build_video_script(selected, title=prompt[:60])
+        session["selected_clips"] = [item["entry"].get("id") for item in selected
+                                     if item["entry"].get("id")]
+        rows = [[item["entry"].get("id") or "-",
+                 item["entry"].get("description", "")[:120], item["narration"]]
+                for item in selected]
+        reading = estimate_speech_seconds(script)
+        status = ("Selected **%d** clips for the **%d** narration scenes with model **%s**. "
+                  "The narration is used **exactly as written** (reading time about "
+                  "**%.0f s**); edit the script below only to change wording, not the "
+                  "footage."
+                  % (sum(1 for item in selected if item["entry"].get("id")),
+                     len(selected), model, reading))
+        return status, script, rows
     target = float(video_duration) if match_narration else 0.0
     selected = select_clips(client, model, prompt, catalog, language=lang, max_shots=shots,
                             target_seconds=target)
@@ -1135,7 +1155,8 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                        library_pick])
             clip_select_button.click(clip_select,
                                      inputs=[clip_prompt, clip_model, clip_language,
-                                             clip_duration, clip_len, session],
+                                             clip_duration, clip_len, clip_narration,
+                                             session],
                                      outputs=[clip_select_status, clip_script, clip_selected])
             clip_illustrate_button.click(clip_illustrate,
                                          inputs=[clip_script, clip_every,

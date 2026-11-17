@@ -787,3 +787,41 @@ def test_plan_overlays_needs_valid_json(fake):
     client = chat_client(fake, '{"not": "a list"}')
     with pytest.raises(ConfigError):
         plan_overlays(client, "m", "Prima scena.")
+
+
+SELECTION_PRESERVE_JSON = '[{"scene": 1, "id": "a_01"}, {"scene": 2, "id": "b_01"}]'
+
+
+def test_select_clips_preserves_the_narration(fake):
+    catalog = [{"id": "a_01", "description": "green hills aerial", "tags": ["hills"],
+                "camera": "drone", "has_people": False, "clip_path": "/tmp/a_01.mp4"},
+               {"id": "b_01", "description": "wine barrels", "tags": ["cellar"],
+                "camera": "static", "has_people": False, "clip_path": "/tmp/b_01.mp4"}]
+    client = chat_client(fake, SELECTION_PRESERVE_JSON)
+    narration = "Colline infinite al tramonto.\n\nNelle cantine il tempo si ferma."
+    selected = select_clips(client, "m", "enoturismo", catalog, narration=narration)
+    assert [item["narration"] for item in selected] == ["Colline infinite al tramonto.",
+                                                        "Nelle cantine il tempo si ferma."]
+    assert [item["entry"]["id"] for item in selected] == ["a_01", "b_01"]
+    system = json.loads(fake.calls[-1]["body"])["messages"][0]["content"]
+    assert "exactly as written" in system
+
+
+def test_select_clips_narration_without_clip_stays_in_the_script(fake):
+    catalog = [{"id": "a_01", "description": "green hills aerial", "tags": ["hills"],
+                "clip_path": "/tmp/a_01.mp4"}]
+    client = chat_client(fake, '[{"scene": 1, "id": "a_01"}, {"scene": 2, "id": "a_01"}]')
+    narration = "Prima scena.\n\nSeconda scena senza clip."
+    selected = select_clips(client, "m", "enoturismo", catalog, narration=narration)
+    assert len(selected) == 2
+    assert selected[1]["entry"].get("id") == ""
+    assert selected[1]["narration"] == "Seconda scena senza clip."
+    script = build_video_script(selected, title="T")
+    assert "Seconda scena senza clip." in script and script.count("![](") == 1
+
+
+def test_select_clips_narration_needs_paragraphs(fake):
+    catalog = [{"id": "a_01", "description": "hills", "tags": [], "clip_path": "/tmp/a.mp4"}]
+    client = chat_client(fake, SELECTION_PRESERVE_JSON)
+    with pytest.raises(ValueError):
+        select_clips(client, "m", "enoturismo", catalog, narration="# solo un titolo")

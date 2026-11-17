@@ -477,3 +477,50 @@ def test_clip_render_passes_transitions(tmp_path, monkeypatch):
     status, out = clip_render("# T\n\nTesto.", "dummy", "auto", 1.0, "", False, "auto", "",
                               "zoom", 0.8, new_session(tmp_path))
     assert calls["transition_style"] == "zoom" and calls["transition"] == 0.8
+
+
+def test_clip_select_uses_the_step1_narration_verbatim(tmp_path, monkeypatch):
+    import voiceover_studio.clips as clips
+    from voiceover_studio.webui import clip_select
+
+    captured = {}
+
+    def fake_select(client, model, prompt, catalog, language="the user's language",
+                    max_shots=8, target_seconds=0.0, narration=""):
+        captured["narration"] = narration
+        return [{"entry": catalog[0], "narration": "Colline infinite al tramonto.",
+                 "scene": 1}]
+
+    monkeypatch.setattr(clips, "select_clips", fake_select)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    clips.save_catalog(session["dir"], [{"id": "c_01", "description": "hills",
+                                         "tags": ["hills"], "clip_path": "/tmp/c_01.mp4"}])
+    status, script, rows = clip_select("enoturismo", "some/model", "italian", 60, 10, session,
+                                       "Colline infinite al tramonto.\n\nSeconda scena.")
+    assert captured["narration"] == "Colline infinite al tramonto.\n\nSeconda scena."
+    assert "exactly as written" in status
+    assert "Colline infinite al tramonto." in script
+    assert session["selected_clips"] == ["c_01"]
+
+
+def test_clip_select_falls_back_to_session_narration(tmp_path, monkeypatch):
+    import voiceover_studio.clips as clips
+    from voiceover_studio.webui import clip_select
+
+    captured = {}
+
+    def fake_select(client, model, prompt, catalog, language="the user's language",
+                    max_shots=8, target_seconds=0.0, narration=""):
+        captured["narration"] = narration
+        return [{"entry": {"id": "", "description": ""}, "narration": narration,
+                 "scene": 1}]
+
+    monkeypatch.setattr(clips, "select_clips", fake_select)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    clips.save_catalog(session["dir"], [{"id": "c_01", "description": "hills",
+                                         "tags": [], "clip_path": "/tmp/c_01.mp4"}])
+    session["wizard_narration"] = "Testo dalla sessione."
+    status, script, rows = clip_select("enoturismo", "some/model", "auto", 60, 10, session)
+    assert captured["narration"] == "Testo dalla sessione."

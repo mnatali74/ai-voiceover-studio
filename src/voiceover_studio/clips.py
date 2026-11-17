@@ -67,6 +67,16 @@ SELECT_SYSTEM = (
     "reuse a clip twice, and make the first shot a strong visual hook."
 )
 
+SELECT_PRESERVE_SYSTEM = (
+    "You assemble a video from a catalog of tagged B-roll clips. The user gives the final "
+    "narration as numbered paragraphs, one per scene. Choose the best clip for each "
+    "paragraph. Respond with ONLY a JSON array, ordered as the final video, no markdown "
+    "fences:\n"
+    '[{{"scene": <paragraph number>, "id": "<clip id from the catalog>"}}]\n'
+    "Never reuse a clip twice and make the first shot a strong visual hook. DO NOT rewrite "
+    "the narration: it will be used exactly as written; you only pick the footage."
+)
+
 SEARCH_SYSTEM = (
     "You are a stock-footage researcher. The user describes the video they are building. "
     "Respond with ONLY a JSON array of {n} different YouTube search queries (short, English) "
@@ -684,17 +694,21 @@ def classify_clip(client: Any, model: str, clip_path: Path, source_title: str,
 
 def select_clips(client: Any, model: str, prompt: str, catalog: List[Dict[str, Any]],
                  language: str = "the user's language", max_shots: int = 8,
-                 target_seconds: float = 0.0) -> List[Dict[str, Any]]:
+                 target_seconds: float = 0.0, narration: str = "") -> List[Dict[str, Any]]:
     """Prompt + catalog -> ordered [{entry, narration}] for the final video.
 
-    With ``target_seconds`` the model is asked to keep the whole narration to the matching
-    word budget, so the video lasts about as long as its reading time."""
+    With ``narration`` (the script written in step 1) the narration is used exactly as
+    written and the model only pairs each paragraph with the best clip. Without it the
+    model also writes one spoken sentence per shot; with ``target_seconds`` it keeps the
+    whole narration to the matching word budget."""
     from .ai_video import _parse_json
     prompt = (prompt or "").strip()
     if not prompt:
         raise ValueError("Write the prompt of the video you want to build.")
     if not catalog:
         raise ValueError("The clip library is empty: download some clips first.")
+    if (narration or "").strip():
+        return _select_clips_for_narration(client, model, narration, catalog)
     listing = "\n".join(
         "%s | %s | tags: %s | camera: %s | people: %s"
         % (entry.get("id"), entry.get("description", "")[:200],
@@ -731,6 +745,55 @@ def select_clips(client: Any, model: str, prompt: str, catalog: List[Dict[str, A
             break
     if not selected:
         raise ConfigError("None of the chosen clips is in the catalog.")
+    return selected
+
+
+def _select_clips_for_narration(client: Any, model: str, narration: str,
+                                catalog: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Pair each narration paragraph with the best clip; the text stays exactly as written."""
+    from .ai_video import _parse_json
+    paragraphs = [p.strip() for p in (narration or "").split("\n\n")
+                  if p.strip() and not p.strip().startswith("#")]
+    if not paragraphs:
+        raise ValueError("Write the narration first (step 1).")
+    listing = "\n".join(
+        "%s | %s | tags: %s | camera: %s | people: %s"
+        % (entry.get("id"), entry.get("description", "")[:200],
+           ", ".join(entry.get("tags") or []), entry.get("camera", ""),
+           entry.get("has_people"))
+        for entry in catalog)
+    numbered = "\n".join("%d. %s" % (i, p) for i, p in enumerate(paragraphs, 1))
+    content = client.chat(model, [
+        {"role": "system", "content": SELECT_PRESERVE_SYSTEM},
+        {"role": "user", "content": "Narration:\n%s\n\nCatalog:\n%s"
+         % (numbered, listing[:24000])}])
+    raw = _parse_json(content)
+    if not isinstance(raw, list):
+        raise ConfigError("The model did not return a selection.")
+    by_id = {entry.get("id"): entry for entry in catalog}
+    paired: Dict[int, Dict[str, Any]] = {}
+    used = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            scene = int(item.get("scene", 0))
+        except (TypeError, ValueError):
+            continue
+        entry = by_id.get(str(item.get("id", "")))
+        if entry is None or entry.get("id") in used or not 1 <= scene <= len(paragraphs):
+            continue
+        used.add(entry.get("id"))
+        paired[scene] = {"entry": entry, "narration": paragraphs[scene - 1], "scene": scene}
+    if not paired:
+        raise ConfigError("None of the chosen clips is in the catalog.")
+    selected = []
+    for scene, paragraph in enumerate(paragraphs, 1):
+        if scene in paired:
+            selected.append(paired[scene])
+        else:
+            selected.append({"entry": {"id": "", "description": ""},
+                             "narration": paragraph, "scene": scene})
     return selected
 
 

@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **The narration is no longer rewritten at clip selection**: with the guided wizard, the
+  step-1 narration is used exactly as written — the model only pairs each paragraph with the
+  best catalog clip (paragraphs without a fitting clip render as animated text, so the video
+  still lasts the full reading time). The old model-written-narration behavior remains for
+  flows without a step-1 script.
 - **Visible errors in the web studio**: handler failures now surface their real message in
   the UI (instead of a bare "Error" toast) and the server launches with `show_error=True` so
   the full traceback is available in the error modal; the Colab notebook picks a free port
