@@ -573,8 +573,45 @@ def clip_preview(script_text: str, vertical: bool, session: Dict[str, Any]
     text = (script_text or "").strip()
     if not text:
         raise ValueError("Select the clips and build the script first.")
-    return render_video_clip(text, "dummy", "auto", 1.0, vertical, "clean", "", None,
-                             session, small=True, output_name="preview.mp4")
+    status, out = render_video_clip(text, "dummy", "auto", 1.0, vertical, "clean", "", None,
+                                    session, small=True, output_name="preview.mp4")
+    session["preview_path"] = out
+    session["vertical"] = bool(vertical)
+    return status, out
+
+
+@_friendly
+def clip_polish(script_text: str, session: Dict[str, Any]) -> Tuple[str, str, Optional[str]]:
+    """AI review & polish: watch the preview, score it, fix what is fixable, re-render."""
+    from .ai_video import OpenRouterClient, best_value_models
+    from .clips import load_catalog
+    from .polish import polish_video
+    video = session.get("preview_path")
+    if not video or not Path(video).is_file():
+        raise ValueError("Run the quick preview first (step 8): the polish reviews that "
+                         "render.")
+    client = OpenRouterClient()
+    model = best_value_models(client)[0]
+    catalog = load_catalog(Path(session["dir"]))
+    log: List[str] = []
+
+    def rerender(script: str) -> str:
+        _, out = clip_preview(script, session.get("vertical", False), session)
+        return out
+
+    result = polish_video(client, model, video, script_text,
+                          Path(session["dir"]) / "polish",
+                          overlay_plan=session.get("overlay_plan") or [],
+                          catalog=catalog, rerender=rerender,
+                          progress=lambda msg: log.append("- %s" % msg))
+    session["preview_path"] = result["video"]
+    status = ("Polish completato with model **%s**: score **%.0f/10** after **%d** round(s)."
+              "\n\n%s" % (model, result["score"], result["rounds"], "\n".join(log)))
+    if result["fixes"]:
+        status += "\n\n**Applied fixes:** " + "; ".join(result["fixes"]) + "."
+    else:
+        status += "\n\nNo automatic fix was needed or available."
+    return status, result["script"], result["video"]
 
 
 @_friendly
@@ -1054,7 +1091,10 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                                 "resolution)")
                 clip_preview_status = gr.Markdown()
                 clip_preview_out = gr.Video(label="Preview draft")
-                clip_render_button = gr.Button("9. Render final video", variant="primary")
+                clip_polish_button = gr.Button("9. AI polish — the model watches the preview "
+                                               "and improves it until professional")
+                clip_polish_status = gr.Markdown()
+                clip_render_button = gr.Button("10. Render final video", variant="primary")
                 clip_video_status = gr.Markdown()
                 clip_video_out = gr.Video(label="Final video")
 
@@ -1104,6 +1144,10 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
             clip_preview_button.click(clip_preview,
                                       inputs=[clip_script, clip_vertical, session],
                                       outputs=[clip_preview_status, clip_preview_out])
+            clip_polish_button.click(clip_polish,
+                                     inputs=[clip_script, session],
+                                     outputs=[clip_polish_status, clip_script,
+                                              clip_preview_out])
             clip_render_button.click(clip_render,
                                      inputs=[clip_script, provider, clip_language, speed,
                                              clip_voice, clip_vertical, clip_style, clip_music,

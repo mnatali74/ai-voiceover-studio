@@ -31,6 +31,13 @@ All notable changes to this project are documented here. The format follows
   message suggests the upgrade when that exact failure occurs.
 
 ### Added
+- **AI polish: the model watches the video and improves it, HeyGen-style**. After the quick
+  preview, a new step samples frames, scores the render 0–10 for professionalism with the
+  vision model and applies what can be fixed automatically — color correction (dark/washed-out
+  frames via an ffmpeg eq pass), overlay cards redrawn in a contrasting style when the text is
+  hard to read, clips swapped for better-matching unused catalog entries when a shot does not
+  fit the narration — then re-renders and reviews again, until the score is good or the rounds
+  run out. The report (score, rounds, applied fixes) is shown in the UI.
 - **Overlay cards drawn locally: text, icons and lines, not AI images**. The presentation
   style no longer generates pictures with an image model: the overlay elements designed in
   the wizard (title, bullet points, icon concepts) are rendered as transparent PNG cards
