@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **Visible errors in the web studio**: handler failures now surface their real message in
+  the UI (instead of a bare "Error" toast) and the server launches with `show_error=True` so
+  the full traceback is available in the error modal; the Colab notebook picks a free port
+  so a second launch no longer crashes.
 - **Clearer OpenRouter errors and model fallback in the Clip studio**: every OpenRouter HTTP
   error now carries an actionable hint (invalid key → openrouter.ai/keys, 402 → no credits,
   404 → model no longer served, 429 → rate limited), and *Suggest search queries* automatically

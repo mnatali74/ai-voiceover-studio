@@ -12,6 +12,7 @@ directly from Python for tests.
 """
 from __future__ import annotations
 
+import functools
 import re
 import shutil
 import tempfile
@@ -36,6 +37,20 @@ Write your narration here, one paragraph per idea.
 
 Add a pause with `[pause 500]`, or **bold** words to stress them in the captions.
 """
+
+
+def _friendly(fn):
+    """Show the real error message in the UI instead of a bare 'Error' toast."""
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except gr.Error:
+            raise
+        except Exception as exc:
+            detail = str(exc).strip() or exc.__class__.__name__
+            raise gr.Error("%s: %s" % (exc.__class__.__name__, detail[:400])) from exc
+    return wrapped
 
 
 def _examples_dir() -> Optional[Path]:
@@ -338,6 +353,7 @@ def clip_suggest(prompt: str, model: str, sources: int, session: Dict[str, Any]
             "then run the search." % (len(queries), model)), "\n".join(queries)
 
 
+@_friendly
 def clip_search(prompt: str, model: str, sources: int, queries: str, cookies: str,
                 stock: List[str], pixabay_key: str, session: Dict[str, Any]
                 ) -> Tuple[str, List[List[Any]], str, Any]:
@@ -498,6 +514,7 @@ def clip_catalog_rows(session: Dict[str, Any]) -> List[List[Any]]:
             for entry in load_catalog(Path(session["dir"]))]
 
 
+@_friendly
 def clip_select(prompt: str, model: str, language: str, video_duration: float,
                 clip_seconds: float, session: Dict[str, Any],
                 match_narration: bool = True) -> Tuple[str, str, List[List[Any]]]:
@@ -533,6 +550,7 @@ def clip_select(prompt: str, model: str, language: str, video_duration: float,
     return status, script, rows
 
 
+@_friendly
 def clip_render(script_text: str, provider: str, language: str, speed: float, voice: str,
                 vertical: bool, style: str, music: str, transition_style: str = "mix",
                 transition: float = 0.5, session: Optional[Dict[str, Any]] = None
@@ -547,6 +565,7 @@ def clip_render(script_text: str, provider: str, language: str, speed: float, vo
                              transition=float(transition))
 
 
+@_friendly
 def clip_preview(script_text: str, vertical: bool, session: Dict[str, Any]
                  ) -> Tuple[str, Optional[str]]:
     """HeyGen-style fast draft: silent, low-resolution, small file — check the flow first."""
@@ -557,6 +576,7 @@ def clip_preview(script_text: str, vertical: bool, session: Dict[str, Any]
                              session, small=True, output_name="preview.mp4")
 
 
+@_friendly
 def clip_illustrate(script_text: str, prompt: str, every: int, style: str, image_model: str,
                     session: Dict[str, Any],
                     plan: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, str]:
@@ -623,6 +643,7 @@ def clip_illustrate(script_text: str, prompt: str, every: int, style: str, image
     return status, "\n".join(out).strip() + "\n"
 
 
+@_friendly
 def wizard_narrate(prompt: str, model: str, language: str, duration: float,
                    session: Dict[str, Any]) -> Tuple[str, str, str, Any]:
     """Step 1: prompt -> narration script + subtitles advice + reading-time duration."""
@@ -646,6 +667,7 @@ def wizard_narrate(prompt: str, model: str, language: str, duration: float,
     return status, narration, advice, gr.update(value=float(max(15, min(300, round(reading)))))
 
 
+@_friendly
 def reading_time(narration: str) -> Tuple[str, Any]:
     """Step 2: narration -> reading-time display + target-duration slider update."""
     from .clips import estimate_speech_seconds
@@ -655,6 +677,7 @@ def reading_time(narration: str) -> Tuple[str, Any]:
         gr.update(value=float(max(15, min(300, round(reading)))))
 
 
+@_friendly
 def wizard_scenes(narration: str, prompt: str, model: str, session: Dict[str, Any]
                   ) -> Tuple[str, List[List[Any]], str]:
     """Step 3: narration -> what each scene should show + stock-search queries."""
@@ -674,6 +697,7 @@ def wizard_scenes(narration: str, prompt: str, model: str, session: Dict[str, An
         rows, queries
 
 
+@_friendly
 def wizard_overlays(narration: str, prompt: str, model: str, session: Dict[str, Any]
                     ) -> Tuple[str, List[List[Any]]]:
     """Step 4: narration -> the text/icon elements of the overlay layer (presentation)."""
@@ -703,6 +727,7 @@ def set_presentation(choice: str, session: Dict[str, Any]) -> str:
         "captions."
 
 
+@_friendly
 def wizard_more_queries(prompt: str, model: str, sources: int, queries: str,
                         session: Dict[str, Any]) -> Tuple[str, str]:
     """Step 5: append fresh alternative queries for candidates the user does not like."""
@@ -1106,4 +1131,5 @@ def launch(host: str = "127.0.0.1", port: int = 7860, workdir: Optional[Path] = 
     """Build and serve the studio (blocking)."""
     app = build_ui(workdir=workdir)
     app.queue()
+    kwargs.setdefault("show_error", True)
     app.launch(server_name=host, server_port=port, **kwargs)
