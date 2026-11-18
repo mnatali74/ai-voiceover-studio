@@ -708,7 +708,7 @@ def test_gf_generate_and_assemble_full_cycle(tmp_path, monkeypatch):
     session = new_session(tmp_path)
     yields = list(gf_generate("some/model", "Acquerello", "", "16:9",
                               "Field, ears left\nField, ears upright\nField, ears right",
-                              "AI frames", "", "m", session))
+                              "AI frames", "", "m", "", session))
     status, files = yields[-1]
     assert "**3**/3 frame image(s) generated" in status
     assert len(files) == 3
@@ -731,7 +731,7 @@ def test_gf_generate_needs_two_prompts(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     session = new_session(tmp_path)
     with pytest.raises(gr.Error, match="At least two frame prompts"):
-        list(gf_generate("m", "Acquerello", "", "16:9", "Only one prompt", "AI frames", "", "m",
+        list(gf_generate("m", "Acquerello", "", "16:9", "Only one prompt", "AI frames", "", "m", "",
                          session))
 
 
@@ -742,6 +742,7 @@ def test_gf_generate_needs_text_model_row_for_lottie(tmp_path, monkeypatch):
 
     def fake_gen(client, model, prompt, out_path, **kwargs):
         assert "bouncing" in prompt
+        assert kwargs.get("kind") == "Cartoon character"
         out_path = Path(str(out_path) + ".json")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text("{}")
@@ -752,7 +753,7 @@ def test_gf_generate_needs_text_model_row_for_lottie(tmp_path, monkeypatch):
     session = new_session(tmp_path)
     yields = list(gf_generate("img/model", "Acquerello", "", "16:9", "",
                               "Motion design (Lottie)", "A bouncing dot, seamless loop",
-                              "m", session))
+                              "m", "Cartoon character", session))
     status, files = yields[-1]
     assert "Lottie animation ready" in status
     assert files == []
@@ -798,7 +799,7 @@ def test_gf_procedural_mode_one_image_no_drift(tmp_path, monkeypatch):
     session = new_session(tmp_path)
     # No planned prompts: the scene comes straight from step 1's prompt box.
     yields = list(gf_generate("some/model", "Acquerello", "", "16:9", "",
-                              "One image + procedural motion", "Wheat field at sunset", "m",
+                              "One image + procedural motion", "Wheat field at sunset", "m", "",
                               session))
     status, files = yields[-1]
     assert "**1**/1 frame image(s) generated" in status

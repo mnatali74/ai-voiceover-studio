@@ -885,7 +885,7 @@ def gf_plan(prompt: str, motion: str, n_frames: int, model: str, mode: str,
 
 
 def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: str,
-                mode: str, scene: str, text_model: str,
+                mode: str, scene: str, text_model: str, toon: str,
                 session: Dict[str, Any]) -> Any:
     """GIF studio step 2 (generator): generate the frame image(s), with a live log."""
     import queue as queue_lib
@@ -917,7 +917,8 @@ def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: s
         if text_model in ("", "best value (auto)"):
             from .ai_video import best_value_models
             text_model = best_value_models(client)[0]
-        status_lines = ["Motion design (Lottie): the model **%s** writes the whole vector animation as Lottie JSON — professional shapes and keyframes, zero image drift, one API call." % text_model]
+        status_lines = ["Motion design (Lottie \u2014 %s): the model **%s** writes the whole vector animation as Lottie JSON \u2014 professional shapes and keyframes, zero image drift, one API call."
+                        % (toon or "infographic", text_model)]
     elif procedural:
         status_lines = ["Procedural mode: generating **1** image with **%s** (style "
                         "**%s**)... then the movement is applied locally: NO drift, one "
@@ -943,7 +944,8 @@ def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: s
                 width, height = ASPECT_SIZES.get(aspect or "16:9", (960, 540))
                 data = generate_lottie(client, text_model, prompts[0],
                                        out_dir / "motion", width=width, height=height,
-                                       n_frames=LOTTIE_FRAMERATE * 2)  # 2 s @ 30 fps
+                                       n_frames=LOTTIE_FRAMERATE * 2,  # 2 s @ 30 fps
+                                       kind=toon)
                 result["lottie"] = str(out_dir / "motion.json")
                 track("Lottie JSON written (%d layers) and validated."
                       % len(data.get("layers", [])))
@@ -1522,6 +1524,10 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                              "scene, different movement phase)", lines=6)
             with gr.Accordion("Step 2 — Generate the frames", open=False):
                 with gr.Row():
+                    gf_toon = gr.Radio(choices=["Cartoon character",
+                                                "Infographic vector"],
+                                       value="Cartoon character", type="value",
+                                       label="Lottie kind: cartoon characters (walk cycle, blink, squash & stretch) or infographic vector motion")
                     gf_image_model = gr.Dropdown(choices=list(ILLUSTRATION_MODELS),
                                                  value=ILLUSTRATION_MODELS[0],
                                                  allow_custom_value=True,
@@ -1567,7 +1573,7 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
             gf_gen_button.click(gf_generate,
                                 inputs=[gf_image_model, gf_style, gf_extra, gf_aspect,
                                         gf_frames, gf_mode, gf_prompt, gf_model,
-                                        session],
+                                        gf_toon, session],
                                 outputs=[gf_gen_status, gf_stills_files])
             gf_build_button.click(gf_assemble,
                                   inputs=[gf_loop, gf_blend, gf_pingpong, gf_mode,

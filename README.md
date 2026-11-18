@@ -209,6 +209,12 @@ that moves, but a real frame-by-frame animation, with three modes:
   seamless-looping GIF (needs `cairosvg` + system `libcairo`; the Colab cell installs both)
   and a live **HTML preview**. Being pure vectors and keyframes, the scene can never drift:
   the loop is professional-grade by construction, with a single LLM call.
+  The animation **kind** is selectable: **'Cartoon character'** — the model builds the
+  character from shape groups (head, torso, arms, legs) and animates it with classic
+cartoon principles (walk cycle with limbs rotating from their joints, body bob, eye blink,
+  squash-and-stretch, walk-in-place so the loop never jumps) — or 'Infographic vector' for
+  icons, arrows and lines. Vector limbs anchored at the joints mean the objects INSIDE the
+  scene really move, with no image warping.
 - **One image + procedural motion** (default, zero drift): the image model draws the scene
   ONCE and the movement is applied locally with a cyclic, sinusoidal transform — `wind`
   (top-heavy sway for ears, grass, flags), `waves` (bottom-heavy sway for water),

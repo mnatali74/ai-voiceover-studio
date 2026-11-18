@@ -92,3 +92,33 @@ def test_lottie_to_gif_loop_is_seamless(fake, tmp_path):
     with Image.open(gif) as im:
         assert im.info.get("loop", 0) == 0  # loops forever
         assert im.size == (960, 540)
+
+
+class _RecordingClient:
+    def __init__(self, content):
+        self.content = content
+        self.calls = []
+
+    def chat(self, model, messages):
+        self.calls.append(messages)
+        return self.content
+
+
+def test_generate_lottie_cartoon_uses_the_character_prompt(tmp_path):
+    from voiceover_studio.lottie_motion import generate_lottie
+    client = _RecordingClient(lottie_answer())
+    generate_lottie(client, "m", "a small fox walking in place", tmp_path / "motion",
+                    kind="Cartoon character")
+    system = client.calls[0][0]["content"]
+    assert "walk cycle" in system.lower()
+    assert "blink" in system.lower()
+    assert "squash" in system.lower()
+
+
+def test_generate_lottie_default_is_infographic(tmp_path):
+    from voiceover_studio.lottie_motion import LOTTIE_FRAMERATE, LOTTIE_SYSTEM, generate_lottie
+    client = _RecordingClient(lottie_answer())
+    generate_lottie(client, "m", "a bouncing dot", tmp_path / "motion")
+    system = client.calls[0][0]["content"]
+    assert "walk cycle" not in system.lower()
+    assert LOTTIE_SYSTEM % {"fr": LOTTIE_FRAMERATE, "op": 60, "w": 960, "h": 540} == system

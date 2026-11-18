@@ -43,6 +43,26 @@ NOT a shaky wiggle.
 
 Answer ONLY with the JSON object."""
 
+CARTOON_TAIL = """The animation is for a **cartoon character** drawn purely with shapes. \
+Build the character as groups of simple shapes (head, torso, arms, legs) and animate it \
+with the classic cartoon principles:
+- Rotate limbs from their joints: each limb group's transform anchor sits at the \
+shoulder/hip; keyframe the rotation so it goes -a -> +a -> -a across the cycle. A walk \
+cycle: right leg and left arm in phase, the opposite ones in antiphase, plus the whole \
+body bobbing up-down once per step.
+- Add life inside the same cycle: a blink (the eye shapes squash to ~10%% height for \
+2-3 frames), squash-and-stretch on the landing (scale 108x92 -> 92x108 -> 100x100), a \
+subtle head tilt.
+- Everything must return EXACTLY to its t=0 value at t=%(op)d (feet at the same contact \
+point) so the character can walk in place forever: one full stride per cycle. If the user \
+asks to move across the scene, move the whole character layer's position linearly and \
+ask how far, or keep the walk in place.
+- Flat colors, bold outlines, strong silhouette readable at video size. No text layers.
+
+Answer ONLY with the JSON object."""
+
+
+CARTOON_SYSTEM = LOTTIE_SYSTEM[:LOTTIE_SYSTEM.index("- Keep it bold")] + CARTOON_TAIL
 
 def _lottie():
     try:
@@ -57,7 +77,7 @@ def _lottie():
 
 def generate_lottie(client: Any, model: str, prompt: str, out_path: Path, *,
                     width: int = 960, height: int = 540, n_frames: int = 60,
-                    extra: str = "") -> Dict[str, Any]:
+                    kind: str = "infographic", extra: str = "") -> Dict[str, Any]:
     """Scene description -> validated Lottie JSON written to ``out_path`` (.json).
 
     The text LLM writes the whole animation; this only normalizes the timeline (frame rate,
@@ -66,12 +86,13 @@ def generate_lottie(client: Any, model: str, prompt: str, out_path: Path, *,
     from .ai_video import _parse_json_object
     if not (prompt or "").strip():
         raise ValueError("Describe the animation (scene, style and what moves).")
+    system = CARTOON_SYSTEM if str(kind).lower().startswith("cartoon") else LOTTIE_SYSTEM
     user = "%s\n\nAnimation description: %s" % (((extra or "").strip() + " to follow."), prompt.strip()) \
         if (extra or "").strip() else prompt.strip()
     content = client.chat(model, [
-        {"role": "system", "content": LOTTIE_SYSTEM % {"fr": LOTTIE_FRAMERATE,
-                                                       "op": int(n_frames), "w": width,
-                                                       "h": height}},
+        {"role": "system", "content": system % {"fr": LOTTIE_FRAMERATE,
+                                                "op": int(n_frames), "w": width,
+                                                "h": height}},
         {"role": "user", "content": user}])
     data = _parse_json_object(content)
     # normalize the timeline: deterministic loop, exact size, exact frame count

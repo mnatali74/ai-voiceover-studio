@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **GIF studio, 'Cartoon character' Lottie kind — the AI animates real vector characters**.
+  In 'Motion design (Lottie)' mode the user can now pick the animation kind: **'Cartoon
+  character'** (default; the model builds the character from shape groups — head, torso,
+  arms, legs — animates it with classic cartoon principles: walk cycle with limbs rotating
+  from their joints in antiphase, body bob, eye blink, squash-and-stretch, walk-in-place so
+  the loop is seamless by construction) or 'Infographic vector' (icons, arrows, lines).
+  Because every limb is a separate vector shape with its anchor at the joint, the animation
+  moves the objects INSIDE the scene — no image warping, no drift.
 - **GIF studio, 'Motion design (Lottie)' mode — the AI writes professional vector
   animations**. Following the user's request for an AI-agnostic GIF animator driven by the
   AI, GIF studio now adopts the **Lottie (Bodymovin) format**, the industry standard for
