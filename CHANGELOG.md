@@ -7,6 +7,18 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **GIF studio, 'One image + procedural motion' mode (zero-drift GIFs)**. Text-to-image
+  models redraw a slightly different scene at every call, so multi-frame AI animations kept
+  'wobbling'. The new default mode asks the image model for the scene only ONCE and applies
+  the movement locally with a cyclic, sinusoidal transform (Pillow): `wind` (top-heavy sway
+  for ears, grass, flags), `waves` (bottom-heavy sway for water), `breathe` (cyclic zoom),
+  `shimmer` (subtle sway), with an adjustable strength and loop duration. The phase wraps
+  around 2π exactly, so the loop **cannot** drift: it returns to the exact starting frame
+  by construction, with one API call. The previous 'AI frames' mode (N drawn frames,
+  ping-pong + cross-fades) stays available for subjects whose movement must be literal
+  (crawling worms, walking animals). Research note: specialized frame-interpolation tools
+  (RIFE / FILM) interpolate between 2 given frames but add GPU checkpoint dependencies, so
+  the interpolation-free procedural route was chosen to stay light on Colab and Chromebook.
 - **GIF studio: a workshop tab dedicated to true animated GIFs, to test the motion before
   building the video**. The AI splits the scene into N frame prompts of the SAME scene
   (identical camera, composition and colors — only the phase of the movement changes:

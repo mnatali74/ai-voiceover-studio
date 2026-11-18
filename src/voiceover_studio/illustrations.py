@@ -5,6 +5,11 @@ Pipeline: narration (one paragraph per scene) -> one concrete image prompt per p
 model -> animated into a looping GIF with a Ken Burns move (Pillow, offline and free) ->
 text, frames and symbols drawn as a transparent card and baked over the animation.
 
+For subjects whose movement must be real (swaying ears, crawling worms...),
+:func:`animate_loop` instead moves ONE single AI image with cyclic procedural motion
+(zero drift between generations) and :func:`build_gif` assembles true multi-frame AI
+animations with ping-pong + cross-fades.
+
 The resulting ``.gif`` files are treated as video shots by the render engine (ffmpeg loops
 them with ``-stream_loop``), so the final clips never look static and the narration audio,
 captions and transitions all keep working unchanged.
@@ -33,6 +38,9 @@ ASPECT_SIZES: Dict[str, Tuple[int, int]] = {"16:9": (960, 540), "1:1": (900, 900
 
 # Motion presets, in the same order as video._moves (Ken Burns loop baked into the GIF).
 MOTIONS = ["push-in", "pan", "pull-out", "pan + rise"]
+
+# Cyclic procedural motions over ONE still image (no AI-frame drift, perfect loop).
+LOOP_MOTIONS = ["wind", "waves", "breathe", "shimmer"]
 
 GIF_OVERLAY_OPACITY = 0.92  # matches the renderer's OVERLAY_OPACITY
 
@@ -112,10 +120,7 @@ def animate_still(src: Any, dest_base: Any, *, overlay: Optional[Any] = None,
         frame = base.crop((int(left), int(top), int(left + cw), int(top + ch))) \
             .resize((w, h), Image.LANCZOS)
         if card is not None:
-            frame_rgba = frame.convert("RGBA")
-            frame_rgba.alpha_composite(card, (w - card.width - max(16, round(w * 0.035)),
-                                              h - card.height - max(16, round(h * 0.035))))
-            frame = frame_rgba.convert("RGB")
+            frame = _bake_card(frame, card, w, h)
         active.append(frame.convert("P", palette=Image.ADAPTIVE, colors=256))
     per_frame = max(20, int(round(loop_seconds * 1000 / frames)))
     active[0].save(dest, save_all=True, append_images=active[1:], duration=per_frame,
@@ -243,6 +248,90 @@ def plan_motion_frames(client: Any, model: str, prompt: str, motion: str,
     while len(prompts) < n_frames:  # pad by cycling the frames the model did return
         prompts.append(prompts[len(prompts) % max(1, len(prompts))])
     return prompts[:n_frames]
+
+
+def animate_loop(src: Any, dest_base: Any, *, overlay: Optional[Any] = None,
+                 size: Tuple[int, int] = (960, 540), motion: str = "wind",
+                 intensity: float = 1.0, frames: int = 14,
+                 loop_seconds: float = 1.6) -> Path:
+    """Turn ONE still image into a seamlessly looping GIF with procedural motion.
+
+    This is the zero-drift alternative to multi-frame AI animations: the image model
+    draws the scene only once, and the movement (wind sway, water ripples, breathing
+    zoom...) is applied locally with Pillow as a cyclic, sinusoidal transformation —
+    the phase wraps around 2*pi exactly, so the loop returns to its starting frame with
+    no discontinuity and the scene can never 'wobble' between AI generations.
+
+    ``motion`` presets: "wind" (top-heavy horizontal sway, for ears/grass/flags),
+    "waves" (bottom-heavy sway, for water and reflections), "breathe" (cyclic zoom),
+    "shimmer" (very subtle sway, for leaves and light). ``intensity`` scales the
+    amplitude (1.0 = default). ``overlay`` is baked like in :func:`animate_still`.
+    """
+    import math
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ConfigError("Pillow is required to animate the illustrations: "
+                          "pip install Pillow (part of 'ai-voiceover-studio[webui]').") from None
+    src, dest = Path(src), Path(str(dest_base) + ".gif")
+    if motion not in LOOP_MOTIONS:
+        motion = "wind"
+    intensity = max(0.1, float(intensity))
+    with Image.open(src) as still:
+        base = still.convert("RGB")
+    w, h = size
+    amp = (max(2, round(w * 0.03 * intensity)) if motion in ("wind", "waves")
+           else max(1, round(w * 0.012 * intensity)) if motion == "shimmer" else 0)
+    margin = amp  # horizontal room the sway needs on each side (0 for "breathe")
+    tw = w + 2 * margin
+    scale = max(tw / base.width, h / base.height)
+    big = base.resize((max(tw, round(base.width * scale)),
+                       max(h, round(base.height * scale))), Image.LANCZOS)
+    big = big.crop(((big.width - tw) // 2, (big.height - h) // 2,
+                    (big.width - tw) // 2 + tw, (big.height - h) // 2 + h))
+    card = None
+    if overlay is not None:
+        ow = max(1, round(w * 0.42))
+        oh = max(1, round(ow * 900 / 1600))
+        card = Image.open(Path(overlay)).convert("RGBA").resize((ow, oh), Image.LANCZOS)
+        alpha = card.getchannel("A").point(lambda v: int(v * GIF_OVERLAY_OPACITY))
+        card.putalpha(alpha)
+    active = []
+    for i in range(frames):
+        phase = 2.0 * math.pi * i / frames  # wraps back exactly: perfect loop by design
+        sway = math.sin(phase)
+        if motion == "breathe":
+            z = 1.0 + 0.05 * intensity * (0.5 - 0.5 * math.cos(phase))
+            cw, ch = tw / z, h / z
+            left = (tw - cw) / 2.0
+            top = (h - ch) / 2.0
+            frame = big.crop((int(left), int(top), int(left + cw), int(top + ch))) \
+                .resize((w, h), Image.LANCZOS)
+        else:
+            if motion == "waves":  # water: the bottom of the frame sways the most
+                slope, s0 = amp * sway / h, 0.0
+            else:  # wind / shimmer: anchored at the bottom, the top sways the most
+                slope, s0 = -amp * sway / h, amp * sway
+            frame = big.transform((w, h), Image.AFFINE,
+                                  (1, slope, s0 - margin, 0, 1, 0),
+                                  resample=Image.BILINEAR)
+        if card is not None:
+            frame = _bake_card(frame, card, w, h)
+        active.append(frame.convert("P", palette=Image.ADAPTIVE, colors=256))
+    per_frame = max(20, int(round(loop_seconds * 1000 / frames)))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    active[0].save(dest, save_all=True, append_images=active[1:], duration=per_frame,
+                   loop=0, optimize=False)
+    return dest
+
+
+def _bake_card(frame: "Image.Image", card: "Image.Image",
+               w: int, h: int) -> "Image.Image":
+    """Bake a transparent card PNG over one frame (same spot as the render engine)."""
+    frame_rgba = frame.convert("RGBA")
+    frame_rgba.alpha_composite(card, (w - card.width - max(16, round(w * 0.035)),
+                                      h - card.height - max(16, round(h * 0.035))))
+    return frame_rgba.convert("RGB")
 
 
 def build_gif(frames: List[Any], dest_base: Any, *, loop_seconds: float = 1.2,

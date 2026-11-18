@@ -395,8 +395,8 @@ def _image_extension(raw: bytes) -> str:
 def _rasterize_svg(raw: bytes, width: int = 1600) -> bytes:
     """SVG -> PNG bytes via cairosvg when it is installed (Colab notebooks have it)."""
     try:
-        import cairosvg
-    except ImportError:
+        import cairosvg  # noqa: F401  (import may also fail at C-library load time)
+    except (ImportError, OSError):
         raise ProviderError("The model returned an SVG image: install cairosvg to use it "
                             "(pip install cairosvg), or pick a different image model.") from None
     try:

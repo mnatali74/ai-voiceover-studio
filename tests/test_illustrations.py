@@ -213,3 +213,43 @@ def test_build_gif_needs_two_frames(tmp_path):
     Image.new("RGB", (64, 64), (1, 2, 3)).save(single)
     with pytest.raises(ValueError):
         build_gif([single], tmp_path / "loop")
+
+
+def test_animate_loop_is_a_seamless_cyclic_gif(tmp_path):
+    """One image + procedural wind: the shift is sinusoidal in 2*pi, so it loops exactly."""
+    from voiceover_studio.illustrations import animate_loop
+    src = tmp_path / "still_01.png"
+    _gradient(src, 640, 360)
+    dest = animate_loop(src, tmp_path / "loop", size=(480, 270), motion="wind", intensity=1.0,
+                        frames=10, loop_seconds=1.5)
+    assert dest.name == "loop.gif"
+    with Image.open(dest) as gif:
+        # Pillow may drop duplicated resting frames (sin(0)=sin(pi) shifts of zero), but the
+        # vast majority of the cycle must survive; the GIF must loop forever.
+        assert gif.n_frames >= 8
+        assert gif.info.get("loop", 0) == 0
+        assert gif.size == (480, 270)
+
+
+def test_animate_loop_supports_all_motions(tmp_path):
+    from voiceover_studio.illustrations import LOOP_MOTIONS, animate_loop
+    src = tmp_path / "still.png"
+    _gradient(src, 640, 360)
+    for motion in LOOP_MOTIONS:
+        dest = animate_loop(src, tmp_path / ("l_" + motion), size=(320, 180), motion=motion,
+                            frames=8)
+        assert dest.is_file()
+    unknown = animate_loop(src, tmp_path / "unknown", size=(320, 180), motion="nonsense",
+                           frames=8)
+    assert unknown.is_file()  # unknown presets fall back to "wind"
+
+
+def test_animate_loop_bakes_the_overlay_card(tmp_path):
+    from voiceover_studio.illustrations import animate_loop
+    src = tmp_path / "still.png"
+    _gradient(src, 640, 360)
+    card = tmp_path / "card.png"
+    Image.new("RGBA", (1600, 900), (10, 10, 10, 255)).save(card)
+    plain = animate_loop(src, tmp_path / "plain", size=(480, 270), frames=8)
+    over = animate_loop(src, tmp_path / "over", overlay=card, size=(480, 270), frames=8)
+    assert plain.read_bytes() != over.read_bytes()

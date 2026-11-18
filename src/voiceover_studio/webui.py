@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .ai_video import DEFAULT_MODELS, ILLUSTRATION_MODELS, ILLUSTRATION_STYLES
 from .overlays import CARD_STYLES
-from .illustrations import MOTIONS
+from .illustrations import ASPECT_SIZES, LOOP_MOTIONS, MOTIONS
 from .errors import ConfigError, ProviderError, VoiceoverError
 from .providers import available_providers
 
@@ -857,11 +857,15 @@ def ill_build_script(narration: str, session: Dict[str, Any]) -> Tuple[str, str]
 
 
 @_friendly
-def gf_plan(prompt: str, motion: str, n_frames: int, model: str,
+def gf_plan(prompt: str, motion: str, n_frames: int, model: str, mode: str,
             session: Dict[str, Any]) -> Tuple[str, str]:
     """GIF studio step 1: scene + movement -> one editable prompt per cycle frame."""
     from .ai_video import OpenRouterClient, best_value_models
     from .illustrations import plan_motion_frames
+    if (mode or "") == "One image + procedural motion":
+        return ("**Procedural mode**: no frame planning is needed \u2014 the AI draws ONE "
+                "image in step 2 and the movement is applied locally (a cyclic wind sway, "
+                "like the render engine's Ken Burns). Go straight to step 2."), ""
     if not (prompt or "").strip():
         raise ValueError("Describe the subject of the animation (step 1).")
     client = OpenRouterClient()
@@ -876,23 +880,37 @@ def gf_plan(prompt: str, motion: str, n_frames: int, model: str,
 
 
 def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: str,
+                mode: str, scene: str,
                 session: Dict[str, Any]) -> Any:
-    """GIF studio step 2 (generator): generate every frame image, with a live log."""
+    """GIF studio step 2 (generator): generate the frame image(s), with a live log."""
     import queue as queue_lib
     import threading
     import time as time_lib
     from .ai_video import OpenRouterClient
     from .illustrations import generate_stills
-    prompts = [line.strip() for line in (frames or "").splitlines() if line.strip()]
-    if len(prompts) < 2:
-        raise gr.Error("At least two frame prompts are needed: run step 1 or write them "
-                       "one per line (same scene, different movement phase).")
+    procedural = (mode or "") == "One image + procedural motion"
+    lines = [line.strip() for line in (frames or "").splitlines() if line.strip()]
+    if procedural:
+        prompts = lines[:1] or [(scene or "").strip()]
+        if not prompts[0]:
+            raise gr.Error("Describe the scene of the animation first (step 1).")
+    else:
+        prompts = lines
+        if len(prompts) < 2:
+            raise gr.Error("At least two frame prompts are needed: run step 1 or write "
+                           "them one per line (same scene, different movement phase).")
     client = OpenRouterClient()
     session["gf_aspect"] = aspect or "16:9"
+    session["gf_mode"] = mode or ""
     out_dir = Path(session["dir"]) / "gif_frames"
-    status_lines = ["Generating **%d** frame image(s) with **%s** (style **%s**)... "
-                    "keep the scene identical, only the movement changes."
-                    % (len(prompts), image_model, style or "none")]
+    if procedural:
+        status_lines = ["Procedural mode: generating **1** image with **%s** (style "
+                        "**%s**)... then the movement is applied locally: NO drift, one "
+                        "API call." % (image_model, style or "none")]
+    else:
+        status_lines = ["Generating **%d** frame image(s) with **%s** (style **%s**)... "
+                        "keep the scene identical, only the movement changes."
+                        % (len(prompts), image_model, style or "none")]
     yield ("\n".join(status_lines), gr.update())
     messages: queue_lib.Queue = queue_lib.Queue()
     progress_tail: List[str] = []
@@ -934,25 +952,42 @@ def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: s
         raise gr.Error("%s: %s" % (exc.__class__.__name__, detail[:400])) from exc
     stills, errors = result["stills"]
     ok = [s for s in stills if s]
-    if len(ok) < 2:
-        raise gr.Error("Not enough frame images were generated (need at least 2, got %d): "
-                       "%s" % (len(ok), " / ".join(errors[:3])[:300]))
+    needed = 1 if procedural else 2
+    if len(ok) < needed:
+        raise gr.Error("Not enough frame images were generated (need at least %d, got %d): "
+                       "%s" % (needed, len(ok), " / ".join(errors[:3])[:300]))
     session["gf_stills"] = stills
     status_lines.append("- [%ds] done" % int(time_lib.time() - started))
-    status = ("**%d**/%d frames generated.\n\n%s" % (len(ok), len(prompts),
-                                                     "\n".join(status_lines)))
+    status = ("**%d**/%d frame image(s) generated (mode: %s).\n\n%s"
+              % (len(ok), len(prompts),
+                 "procedural - one image" if procedural else "AI frames",
+                 "\n".join(status_lines)))
     for error in errors:
         status += "\n\n⚠️ %s" % error
     yield status, [s for s in stills if s]
 
 
 @_friendly
-def gf_assemble(loop_seconds: float, blend: int, pingpong: bool,
-                session: Dict[str, Any]) -> Tuple[str, Optional[str]]:
-    """GIF studio step 3 (local, free): assemble the frames into a seamless looping GIF."""
-    from .illustrations import build_gif
+def gf_assemble(loop_seconds: float, blend: int, pingpong: bool, mode: str, preset: str,
+                intensity: float, session: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """GIF studio step 3 (local, free): assemble the seamless looping GIF."""
+    from .illustrations import LOOP_MOTIONS, animate_loop, build_gif
     stills = session.get("gf_stills") or []
     ok = [s for s in stills if s]
+    if (mode or "") == "One image + procedural motion":
+        if len(ok) < 1:
+            raise ValueError("Generate the image first (step 2).")
+        aspect = session.get("gf_aspect") or "16:9"
+        gif = animate_loop(ok[0], Path(session["dir"]) / "animations" / "loop",
+                           size=ASPECT_SIZES.get(aspect, (960, 540)),
+                           motion=preset if preset in LOOP_MOTIONS else "wind",
+                           intensity=float(intensity), frames=14,
+                           loop_seconds=float(loop_seconds))
+        return ("GIF ready: **%s** - 14 procedural frames of the ONE image (motion preset "
+                "**%s**, strength %.1f), loop of **%.1f s**. By construction there is no AI "
+                "drift: the same picture is moved cyclically and the cycle wraps back to the "
+                "exact starting point. When it looks right, we move to the video steps."
+                % (gif.name, preset, float(intensity), float(loop_seconds))), str(gif)
     if len(ok) < 2:
         raise ValueError("Generate the frame images first (step 2).")
     gif = build_gif(ok, Path(session["dir"]) / "animations" / "loop", loop_seconds=float(loop_seconds),
@@ -961,8 +996,9 @@ def gf_assemble(loop_seconds: float, blend: int, pingpong: bool,
     slots = frames_n + frames_n * int(blend)
     return ("GIF ready: **%s** — %d frames (%s order), %d cross-fade(s) inserted, loop of "
             "**%.1f s** that returns to the starting frame with no jump. Watch it a few "
-            "times: if the scene 'wiggles' between frames, raise the cross-fade or lower "
-            "the number of frames; when it looks right, we move to the video steps."
+            "times: if the scene 'wiggles' between frames (the image model drifted), "
+            "switch to 'One image + procedural motion' at the top - that mode cannot "
+            "drift. When it looks right, we move to the video steps."
             % (gif.name, frames_n, "ping-pong" if pingpong else "forward", int(blend) * frames_n,
                float(loop_seconds))), str(gif)
 
@@ -1387,13 +1423,23 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                     outputs=[ill_render_status, ill_render_out])
 
         with gr.Tab("GIF studio"):
-            gr.Markdown("Dedicated workshop: **only seamless looping animated GIFs**, made of "
-                        "real AI frames — the image model draws the **same scene N times**, "
-                        "changing only the phase of the movement (wheat ears swaying, worms "
-                        "crawling...), and the frames play forward-and-back so the loop "
-                        "always returns to its starting point with **no discontinuity**. "
-                        "Test the animation here; the video steps come later, once the GIF "
-                        "looks right. Needs `OPENROUTER_API_KEY`.")
+            gr.Markdown("Dedicated workshop: **only seamless looping animated GIFs**. Two "
+                        "modes:\n\n"
+                        "- **One image + procedural motion** (recommended): the AI draws "
+                        "the scene ONCE and the movement (wind sway, ripples, breathing "
+                        "zoom) is applied locally with a cyclic motion — the loop wraps "
+                        "back to the exact starting point and the scene can NEVER drift "
+                        "between frames. One API call, cheapest.\n"
+                        "- **AI frames**: the image model draws the **same scene N "
+                        "times**, changing only the phase of the movement (wheat ears "
+                        "swaying, worms crawling...). Movement is more literal, but the "
+                        "model may draw slightly different frames — ping-pong and "
+                        "cross-fades reduce it.\n\n"
+                        "Test the animation here; the video steps come later, once the "
+                        "GIF looks right. Needs `OPENROUTER_API_KEY`.")
+            gf_mode = gr.Radio(choices=["One image + procedural motion", "AI frames"],
+                               value="One image + procedural motion", type="value",
+                               label="Animation mode")
             with gr.Accordion("Step 1 — Plan the cycle", open=True):
                 with gr.Row():
                     gf_prompt = gr.Textbox(label="Scene of the animation", lines=2,
@@ -1410,8 +1456,8 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                            value="best value (auto)",
                                            allow_custom_value=True,
                                            label="Planning model (OpenRouter, text)")
-                gf_plan_button = gr.Button("1. Plan the cycle frames (AI)",
-                                           variant="primary")
+                gf_plan_button = gr.Button("1. Plan the cycle frames (AI — only in "
+                                           "'AI frames' mode)", variant="primary")
                 gf_plan_status = gr.Markdown()
                 gf_frames = gr.Textbox(label="Frame prompts (one per line, editable — same "
                                              "scene, different movement phase)", lines=6)
@@ -1426,8 +1472,8 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                     gf_aspect = gr.Radio(choices=["16:9", "1:1", "9:16"], value="16:9",
                                          label="Aspect ratio")
                 gf_extra = gr.Textbox(label="Extra style details (optional)", lines=1)
-                gf_gen_button = gr.Button("2. Generate the frame images (one API call per "
-                                          "frame — paid)", variant="primary")
+                gf_gen_button = gr.Button("2. Generate the image(s) (paid — 1 call in "
+                                          "procedural mode)", variant="primary")
                 gf_gen_status = gr.Markdown()
                 gf_stills_files = gr.Files(label="Frame images")
             with gr.Accordion("Step 3 — Assemble the animated GIF", open=False):
@@ -1441,20 +1487,30 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                 gf_pingpong = gr.Checkbox(value=True,
                                           label="Ping-pong (forward + backward: the loop "
                                                 "returns exactly to the start, seamless)")
+                gf_preset = gr.Dropdown(choices=list(LOOP_MOTIONS), value="wind",
+                                        label="Procedural motion preset (procedural mode "
+                                              "only): wind = swaying tops (ears, grass, "
+                                              "flags), waves = swaying bottom (water), "
+                                              "breathe = cyclic zoom, shimmer = subtle "
+                                              "sway")
+                gf_intensity = gr.Slider(0.5, 2.0, value=1.0, step=0.1,
+                                         label="Movement strength (procedural mode)")
                 gf_build_button = gr.Button("3. Assemble the animated GIF (local, free)",
                                             variant="primary")
                 gf_status = gr.Markdown()
                 gf_gif = gr.File(label="Animated GIF")
 
             gf_plan_button.click(gf_plan,
-                                 inputs=[gf_prompt, gf_motion, gf_n, gf_model, session],
+                                 inputs=[gf_prompt, gf_motion, gf_n, gf_model, gf_mode,
+                                         session],
                                  outputs=[gf_plan_status, gf_frames])
             gf_gen_button.click(gf_generate,
                                 inputs=[gf_image_model, gf_style, gf_extra, gf_aspect,
-                                        gf_frames, session],
+                                        gf_frames, gf_mode, gf_prompt, session],
                                 outputs=[gf_gen_status, gf_stills_files])
             gf_build_button.click(gf_assemble,
-                                  inputs=[gf_loop, gf_blend, gf_pingpong, session],
+                                  inputs=[gf_loop, gf_blend, gf_pingpong, gf_mode,
+                                          gf_preset, gf_intensity, session],
                                   outputs=[gf_status, gf_gif])
 
         with gr.Tab("Video wizard"):

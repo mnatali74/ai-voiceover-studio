@@ -673,10 +673,21 @@ def test_gf_plan_writes_the_cycle_prompts(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     session = new_session(tmp_path)
     status, text = gf_plan("Wheat field at sunset", "the ears sway in the wind", 3, "m",
-                           session)
+                           "AI frames", session)
     assert "loops seamlessly" in status
     assert text == "Field, ears left\nField, ears upright\nField, ears right"
     assert session["gf_prompts"] == prompts
+
+
+def test_gf_plan_procedural_mode_needs_no_llm(tmp_path):
+    from voiceover_studio.webui import gf_plan
+
+    session = new_session(tmp_path)
+    status, text = gf_plan("Wheat field at sunset", "the ears sway in the wind", 4, "m",
+                           "One image + procedural motion", session)
+    assert "Procedural mode" in status
+    assert "Go straight to step 2" in status
+    assert text == "" 
 
 
 def test_gf_generate_and_assemble_full_cycle(tmp_path, monkeypatch):
@@ -697,13 +708,13 @@ def test_gf_generate_and_assemble_full_cycle(tmp_path, monkeypatch):
     session = new_session(tmp_path)
     yields = list(gf_generate("some/model", "Acquerello", "", "16:9",
                               "Field, ears left\nField, ears upright\nField, ears right",
-                              session))
+                              "AI frames", "", session))
     status, files = yields[-1]
-    assert "**3**/3 frames generated" in status
+    assert "**3**/3 frame image(s) generated" in status
     assert len(files) == 3
     assert session["gf_stills"] == files
 
-    gif_status, gif = gf_assemble(1.0, 1, True, session)
+    gif_status, gif = gf_assemble(1.0, 1, True, "AI frames", "wind", 1.0, session)
     assert "ping-pong" in gif_status
     from PIL import Image
     with Image.open(gif) as g:
@@ -720,4 +731,47 @@ def test_gf_generate_needs_two_prompts(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     session = new_session(tmp_path)
     with pytest.raises(gr.Error, match="At least two frame prompts"):
-        list(gf_generate("m", "Acquerello", "", "16:9", "Only one prompt", session))
+        list(gf_generate("m", "Acquerello", "", "16:9", "Only one prompt", "AI frames", "",
+                         session))
+
+
+def test_gf_procedural_mode_one_image_no_drift(tmp_path, monkeypatch):
+    """Procedural mode: ONE image is generated and the loop is built locally."""
+    import voiceover_studio.illustrations as illustrations
+    from voiceover_studio.webui import gf_assemble, gf_generate
+
+    def fake_stills(client, model, prompts, out_dir, **kwargs):
+        from PIL import Image
+
+        assert len(prompts) == 1
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        im = Image.new("RGB", (480, 270))
+        px = im.load()
+        for y in range(270):
+            for x in range(0, 480, 8):
+                px[x, y] = (x * 255 // 480, y * 255 // 270, 128)
+        still = out_dir / "still_01.png"
+        im.save(still)
+        return [str(still)], []
+
+    monkeypatch.setattr(illustrations, "generate_stills", fake_stills)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    # No planned prompts: the scene comes straight from step 1's prompt box.
+    yields = list(gf_generate("some/model", "Acquerello", "", "16:9", "",
+                              "One image + procedural motion", "Wheat field at sunset",
+                              session))
+    status, files = yields[-1]
+    assert "**1**/1 frame image(s) generated" in status
+    assert "procedural" in status
+    assert len(files) == 1
+    assert session["gf_stills"] == files
+
+    gif_status, gif = gf_assemble(1.2, 2, True, "One image + procedural motion", "wind",
+                                  1.0, session)
+    assert "no AI " in gif_status
+    assert "procedural frames" in gif_status
+    from PIL import Image
+    with Image.open(gif) as g:
+        assert g.n_frames >= 8
+        assert g.info.get("loop", 0) == 0
