@@ -708,13 +708,13 @@ def test_gf_generate_and_assemble_full_cycle(tmp_path, monkeypatch):
     session = new_session(tmp_path)
     yields = list(gf_generate("some/model", "Acquerello", "", "16:9",
                               "Field, ears left\nField, ears upright\nField, ears right",
-                              "AI frames", "", session))
+                              "AI frames", "", "m", session))
     status, files = yields[-1]
     assert "**3**/3 frame image(s) generated" in status
     assert len(files) == 3
     assert session["gf_stills"] == files
 
-    gif_status, gif = gf_assemble(1.0, 1, True, "AI frames", "wind", 1.0, session)
+    gif_status, gif, _extras = gf_assemble(1.0, 1, True, "AI frames", "wind", 1.0, session)
     assert "ping-pong" in gif_status
     from PIL import Image
     with Image.open(gif) as g:
@@ -731,8 +731,47 @@ def test_gf_generate_needs_two_prompts(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     session = new_session(tmp_path)
     with pytest.raises(gr.Error, match="At least two frame prompts"):
-        list(gf_generate("m", "Acquerello", "", "16:9", "Only one prompt", "AI frames", "",
+        list(gf_generate("m", "Acquerello", "", "16:9", "Only one prompt", "AI frames", "", "m",
                          session))
+
+
+def test_gf_generate_needs_text_model_row_for_lottie(tmp_path, monkeypatch):
+    """Lottie mode: the TEXT model writes the whole animation; the GIF never drifts."""
+    import voiceover_studio.lottie_motion as lottie_motion
+    from voiceover_studio.webui import gf_assemble, gf_generate
+
+    def fake_gen(client, model, prompt, out_path, **kwargs):
+        assert "bouncing" in prompt
+        out_path = Path(str(out_path) + ".json")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("{}")
+        return {"layers": [{"ty": 4}]}
+
+    monkeypatch.setattr(lottie_motion, "generate_lottie", fake_gen)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    yields = list(gf_generate("img/model", "Acquerello", "", "16:9", "",
+                              "Motion design (Lottie)", "A bouncing dot, seamless loop",
+                              "m", session))
+    status, files = yields[-1]
+    assert "Lottie animation ready" in status
+    assert files == []
+    assert Path(session["gf_lottie"]).name == "motion.json"
+
+    def fake_to_gif(json_path, dest_base, **kwargs):
+        gif = Path(str(dest_base) + ".gif")
+        html = Path(str(dest_base) + ".html")
+        gif.parent.mkdir(parents=True, exist_ok=True)
+        gif.write_bytes(b"GIF89a")
+        html.write_text("<html>lottie</html>")
+        return gif, html
+
+    monkeypatch.setattr(lottie_motion, "lottie_to_gif", fake_to_gif)
+    status2, gif, extras = gf_assemble(1.2, 2, True, "Motion design (Lottie)", "wind", 1.0,
+                                       session)
+    assert "Motion-design GIF ready" in status2
+    assert gif.endswith(".gif")
+    assert any(str(e).endswith(".html") for e in extras)
 
 
 def test_gf_procedural_mode_one_image_no_drift(tmp_path, monkeypatch):
@@ -759,7 +798,7 @@ def test_gf_procedural_mode_one_image_no_drift(tmp_path, monkeypatch):
     session = new_session(tmp_path)
     # No planned prompts: the scene comes straight from step 1's prompt box.
     yields = list(gf_generate("some/model", "Acquerello", "", "16:9", "",
-                              "One image + procedural motion", "Wheat field at sunset",
+                              "One image + procedural motion", "Wheat field at sunset", "m",
                               session))
     status, files = yields[-1]
     assert "**1**/1 frame image(s) generated" in status
@@ -767,10 +806,11 @@ def test_gf_procedural_mode_one_image_no_drift(tmp_path, monkeypatch):
     assert len(files) == 1
     assert session["gf_stills"] == files
 
-    gif_status, gif = gf_assemble(1.2, 2, True, "One image + procedural motion", "wind",
-                                  1.0, session)
+    gif_status, gif, extras = gf_assemble(1.2, 2, True, "One image + procedural motion",
+                                          "wind", 1.0, session)
     assert "no AI " in gif_status
     assert "procedural frames" in gif_status
+    assert extras == []
     from PIL import Image
     with Image.open(gif) as g:
         assert g.n_frames >= 8

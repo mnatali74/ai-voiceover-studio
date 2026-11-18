@@ -200,8 +200,15 @@ with the narrator voice, transitions and captions of your choice.
 ## GIF studio: seamless looping GIFs from AI frames
 
 The *GIF studio* tab is a workshop dedicated to **true animated GIFs** — not a still picture
-that moves, but a real frame-by-frame animation, with two modes:
+that moves, but a real frame-by-frame animation, with three modes:
 
+- **Motion design (Lottie)** (default): the TEXT model writes the whole animation as a
+  **Lottie (Bodymovin) JSON** — the industry standard for professional explainer motion:
+  vector shapes, lines, icons, keyframed position/scale/rotation, trim-path line drawing.
+  `python-lottie` (pure Python, no AI inside) validates the JSON, renders a
+  seamless-looping GIF (needs `cairosvg` + system `libcairo`; the Colab cell installs both)
+  and a live **HTML preview**. Being pure vectors and keyframes, the scene can never drift:
+  the loop is professional-grade by construction, with a single LLM call.
 - **One image + procedural motion** (default, zero drift): the image model draws the scene
   ONCE and the movement is applied locally with a cyclic, sinusoidal transform — `wind`
   (top-heavy sway for ears, grass, flags), `waves` (bottom-heavy sway for water),

@@ -7,6 +7,18 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **GIF studio, 'Motion design (Lottie)' mode — the AI writes professional vector
+  animations**. Following the user's request for an AI-agnostic GIF animator driven by the
+  AI, GIF studio now adopts the **Lottie (Bodymovin) format**, the industry standard for
+  professional explainer motion design. The TEXT model writes the whole animation as a
+  Lottie JSON (shapes, lines, icons, keyframed motion, trim-path line drawing — no raster
+  images at all, so the scene can never drift between frames); `python-lottie` (pure
+  Python, no AI inside, added to the `webui` extra) validates the JSON and renders the
+  seamless-looping GIF (needs cairosvg + libcairo, installed by Colab cell 1) plus a live
+  **HTML preview** playable in the browser. The UI normalizes the timeline (30 fps, exact
+  canvas, seamless first==last keyframe guidance in the system prompt), and the new default
+  GIF-studio mode is 'Motion design (Lottie)'; 'One image + procedural motion' and 'AI
+  frames' remain selectable.
 - **GIF studio, 'One image + procedural motion' mode (zero-drift GIFs)**. Text-to-image
   models redraw a slightly different scene at every call, so multi-frame AI animations kept
   'wobbling'. The new default mode asks the image model for the scene only ONCE and applies

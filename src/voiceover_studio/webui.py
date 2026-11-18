@@ -862,6 +862,11 @@ def gf_plan(prompt: str, motion: str, n_frames: int, model: str, mode: str,
     """GIF studio step 1: scene + movement -> one editable prompt per cycle frame."""
     from .ai_video import OpenRouterClient, best_value_models
     from .illustrations import plan_motion_frames
+    if (mode or "") == "Motion design (Lottie)":
+        return ("**Lottie mode**: no frame planning is needed \u2014 step 2 asks the model to "
+                "WRITE the whole vector animation as professional Lottie JSON (shapes, "
+                "lines, icons: the motion design used in high-end explainers). Go "
+                "straight to step 2."), ""
     if (mode or "") == "One image + procedural motion":
         return ("**Procedural mode**: no frame planning is needed \u2014 the AI draws ONE "
                 "image in step 2 and the movement is applied locally (a cyclic wind sway, "
@@ -880,7 +885,7 @@ def gf_plan(prompt: str, motion: str, n_frames: int, model: str, mode: str,
 
 
 def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: str,
-                mode: str, scene: str,
+                mode: str, scene: str, text_model: str,
                 session: Dict[str, Any]) -> Any:
     """GIF studio step 2 (generator): generate the frame image(s), with a live log."""
     import queue as queue_lib
@@ -889,8 +894,13 @@ def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: s
     from .ai_video import OpenRouterClient
     from .illustrations import generate_stills
     procedural = (mode or "") == "One image + procedural motion"
+    lottie = (mode or "") == "Motion design (Lottie)"
     lines = [line.strip() for line in (frames or "").splitlines() if line.strip()]
-    if procedural:
+    if lottie:
+        prompts = [(scene or "").strip()]
+        if not prompts[0]:
+            raise gr.Error("Describe the scene of the animation first (step 1).")
+    elif procedural:
         prompts = lines[:1] or [(scene or "").strip()]
         if not prompts[0]:
             raise gr.Error("Describe the scene of the animation first (step 1).")
@@ -903,7 +913,12 @@ def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: s
     session["gf_aspect"] = aspect or "16:9"
     session["gf_mode"] = mode or ""
     out_dir = Path(session["dir"]) / "gif_frames"
-    if procedural:
+    if lottie:
+        if text_model in ("", "best value (auto)"):
+            from .ai_video import best_value_models
+            text_model = best_value_models(client)[0]
+        status_lines = ["Motion design (Lottie): the model **%s** writes the whole vector animation as Lottie JSON — professional shapes and keyframes, zero image drift, one API call." % text_model]
+    elif procedural:
         status_lines = ["Procedural mode: generating **1** image with **%s** (style "
                         "**%s**)... then the movement is applied locally: NO drift, one "
                         "API call." % (image_model, style or "none")]
@@ -923,9 +938,19 @@ def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: s
 
     def worker() -> None:
         try:
-            result["stills"] = generate_stills(client, image_model, prompts, out_dir,
-                                               style=style, extra=extra, aspect=aspect,
-                                               progress=track)
+            if lottie:
+                from .lottie_motion import LOTTIE_FRAMERATE, generate_lottie
+                width, height = ASPECT_SIZES.get(aspect or "16:9", (960, 540))
+                data = generate_lottie(client, text_model, prompts[0],
+                                       out_dir / "motion", width=width, height=height,
+                                       n_frames=LOTTIE_FRAMERATE * 2)  # 2 s @ 30 fps
+                result["lottie"] = str(out_dir / "motion.json")
+                track("Lottie JSON written (%d layers) and validated."
+                      % len(data.get("layers", [])))
+            else:
+                result["stills"] = generate_stills(client, image_model, prompts, out_dir,
+                                                   style=style, extra=extra, aspect=aspect,
+                                                   progress=track)
         except Exception as exc:
             result["error"] = exc
 
@@ -950,6 +975,13 @@ def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: s
         exc = result["error"]
         detail = str(exc).strip() or exc.__class__.__name__
         raise gr.Error("%s: %s" % (exc.__class__.__name__, detail[:400])) from exc
+    if "lottie" in result:
+        session["gf_lottie"] = result["lottie"]
+        session["gf_stills"] = []
+        status_lines.append("- [%ds] done" % int(time_lib.time() - started))
+        yield ("Lottie animation ready (**%s**, validated): move to step 3 to render "
+               "the seamless-looping GIF." % result["lottie"]), []
+        return
     stills, errors = result["stills"]
     ok = [s for s in stills if s]
     needed = 1 if procedural else 2
@@ -969,9 +1001,29 @@ def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: s
 
 @_friendly
 def gf_assemble(loop_seconds: float, blend: int, pingpong: bool, mode: str, preset: str,
-                intensity: float, session: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+                intensity: float,
+                session: Dict[str, Any]) -> Tuple[str, Optional[str], list]:
     """GIF studio step 3 (local, free): assemble the seamless looping GIF."""
     from .illustrations import LOOP_MOTIONS, animate_loop, build_gif
+    if (mode or "") == "Motion design (Lottie)":
+        from .lottie_motion import lottie_to_gif
+        json_path = session.get("gf_lottie")
+        if not json_path or not Path(json_path).is_file():
+            raise ValueError("Generate the Lottie animation first (step 2).")
+        dest = Path(session["dir"]) / "animations" / "motion"
+        gif, html = lottie_to_gif(json_path, dest, loop_seconds=float(loop_seconds),
+                                  with_html=True)
+        extras = [json_path] + ([str(html)] if html else [])
+        if gif is None:
+            return ("The Lottie JSON is ready, but the GIF rasterizer needs cairosvg + "
+                    "libcairo (the Colab cell 1 installs both). The .html preview was "
+                    "generated anyway: open it in the browser to check the animation.",
+                    None, extras)
+        extras.append(str(gif))
+        return ("Motion-design GIF ready: **%s** — the AI drew it as vectors, so "
+                "there is no image drift by construction and the loop is seamless. The "
+                ".html plays the animation in the browser; the .json is editable and "
+                "re-importable everywhere." % gif.name), str(gif), extras
     stills = session.get("gf_stills") or []
     ok = [s for s in stills if s]
     if (mode or "") == "One image + procedural motion":
@@ -987,7 +1039,7 @@ def gf_assemble(loop_seconds: float, blend: int, pingpong: bool, mode: str, pres
                 "**%s**, strength %.1f), loop of **%.1f s**. By construction there is no AI "
                 "drift: the same picture is moved cyclically and the cycle wraps back to the "
                 "exact starting point. When it looks right, we move to the video steps."
-                % (gif.name, preset, float(intensity), float(loop_seconds))), str(gif)
+                % (gif.name, preset, float(intensity), float(loop_seconds))), str(gif), []
     if len(ok) < 2:
         raise ValueError("Generate the frame images first (step 2).")
     gif = build_gif(ok, Path(session["dir"]) / "animations" / "loop", loop_seconds=float(loop_seconds),
@@ -1000,7 +1052,7 @@ def gf_assemble(loop_seconds: float, blend: int, pingpong: bool, mode: str, pres
             "switch to 'One image + procedural motion' at the top - that mode cannot "
             "drift. When it looks right, we move to the video steps."
             % (gif.name, frames_n, "ping-pong" if pingpong else "forward", int(blend) * frames_n,
-               float(loop_seconds))), str(gif)
+               float(loop_seconds))), str(gif), []
 
 
 @_friendly
@@ -1423,23 +1475,30 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                     outputs=[ill_render_status, ill_render_out])
 
         with gr.Tab("GIF studio"):
-            gr.Markdown("Dedicated workshop: **only seamless looping animated GIFs**. Two "
+            gr.Markdown("Dedicated workshop: **only seamless looping animated GIFs**. Three "
                         "modes:\n\n"
-                        "- **One image + procedural motion** (recommended): the AI draws "
-                        "the scene ONCE and the movement (wind sway, ripples, breathing "
-                        "zoom) is applied locally with a cyclic motion — the loop wraps "
-                        "back to the exact starting point and the scene can NEVER drift "
-                        "between frames. One API call, cheapest.\n"
+                        "- **Motion design (Lottie)** (professional): the TEXT model "
+                        "writes the whole vector animation as Lottie JSON (shapes, lines, "
+                        "icons, keyframed motion — the format used in high-end "
+                        "explainers). Rendered locally by python-lottie; the loop returns "
+                        "to the exact starting keyframe, so it NEVER drifts. One API "
+                        "call. Use it for infographic-style animations: arrows, lines, "
+                        "icons, abstract motion.\n"
+                        "- **One image + procedural motion**: the AI draws the scene ONCE "
+                        "and the movement (wind sway, ripples, breathing zoom) is applied "
+                        "locally with a cyclic motion. Never drifts, keeps the drawn "
+                        "scene. One API call.\n"
                         "- **AI frames**: the image model draws the **same scene N "
                         "times**, changing only the phase of the movement (wheat ears "
-                        "swaying, worms crawling...). Movement is more literal, but the "
-                        "model may draw slightly different frames — ping-pong and "
-                        "cross-fades reduce it.\n\n"
+                        "swaying, worms crawling...). Most literal, but the model may "
+                        "draw slightly different frames — ping-pong and cross-fades "
+                        "reduce it.\n\n"
                         "Test the animation here; the video steps come later, once the "
                         "GIF looks right. Needs `OPENROUTER_API_KEY`.")
-            gf_mode = gr.Radio(choices=["One image + procedural motion", "AI frames"],
-                               value="One image + procedural motion", type="value",
-                               label="Animation mode")
+            gf_mode = gr.Radio(
+                choices=["Motion design (Lottie)", "One image + procedural motion",
+                         "AI frames"],
+                value="Motion design (Lottie)", type="value", label="Animation mode")
             with gr.Accordion("Step 1 — Plan the cycle", open=True):
                 with gr.Row():
                     gf_prompt = gr.Textbox(label="Scene of the animation", lines=2,
@@ -1499,6 +1558,7 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                             variant="primary")
                 gf_status = gr.Markdown()
                 gf_gif = gr.File(label="Animated GIF")
+                gf_files = gr.Files(label="Other outputs (Lottie JSON, HTML preview)")
 
             gf_plan_button.click(gf_plan,
                                  inputs=[gf_prompt, gf_motion, gf_n, gf_model, gf_mode,
@@ -1506,12 +1566,13 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                  outputs=[gf_plan_status, gf_frames])
             gf_gen_button.click(gf_generate,
                                 inputs=[gf_image_model, gf_style, gf_extra, gf_aspect,
-                                        gf_frames, gf_mode, gf_prompt, session],
+                                        gf_frames, gf_mode, gf_prompt, gf_model,
+                                        session],
                                 outputs=[gf_gen_status, gf_stills_files])
             gf_build_button.click(gf_assemble,
                                   inputs=[gf_loop, gf_blend, gf_pingpong, gf_mode,
                                           gf_preset, gf_intensity, session],
-                                  outputs=[gf_status, gf_gif])
+                                  outputs=[gf_status, gf_gif, gf_files])
 
         with gr.Tab("Video wizard"):
             gr.Markdown("Guided flow, one step at a time: the AI writes the narration from "
