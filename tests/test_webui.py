@@ -257,6 +257,54 @@ def test_clip_build_uses_selected_sources(tmp_path, monkeypatch):
     assert session["library"]["clips"]
 
 
+def test_clip_build_needs_a_source(tmp_path, monkeypatch):
+    """Generator body: even early validation errors must be readable gr.Error popups."""
+    import gradio as gr
+
+    from voiceover_studio.webui import clip_build
+
+    session = new_session(tmp_path)
+    with pytest.raises(gr.Error, match="Select at least one video source"):
+        list(clip_build([], "", "some/model", True, 2, 10, True, 5.0, 60, session))
+
+
+def test_clip_build_raises_a_readable_error(tmp_path, monkeypatch):
+    """A crash in the worker thread surfaces with class + detail, not a bare 'Error'."""
+    import gradio as gr
+    from voiceover_studio.errors import ConfigError
+    from voiceover_studio.webui import clip_build
+    import voiceover_studio.clips as clips
+
+    def failing_build(urls, workdir, client, model, **kwargs):
+        raise ConfigError('The clip studio needs yt-dlp: pip install "ai-voiceover-studio[clip]"')
+
+    monkeypatch.setattr(clips, "build_library", failing_build)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    with pytest.raises(gr.Error, match=r"The clip studio needs yt-dlp"):
+        list(clip_build([], "https://youtu.be/abc", "some/model", True, 2,
+                        10, True, 5.0, 60, session))
+
+
+def test_clip_build_no_clips_reports_the_source_errors(tmp_path, monkeypatch):
+    """If nothing was cut, the per-source failures must reach the user, not vanish."""
+    import gradio as gr
+    from voiceover_studio.webui import clip_build
+    import voiceover_studio.clips as clips
+
+    def empty_build(urls, workdir, client, model, **kwargs):
+        return {"clips": [], "frames": [], "segments": [],
+                "sources": [], "errors": ["https://youtu.be/abc: Sign in to confirm you are "
+                                          "not a bot (bot check)"], "catalog": []}
+
+    monkeypatch.setattr(clips, "build_library", empty_build)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    with pytest.raises(gr.Error, match="Step 5 produced no clips.*bot check"):
+        list(clip_build([], "https://youtu.be/abc", "some/model", True, 2,
+                        10, True, 5.0, 60, session))
+
+
 def test_clip_select_builds_script(tmp_path, monkeypatch):
     import voiceover_studio.clips as clips
     from voiceover_studio.webui import clip_select

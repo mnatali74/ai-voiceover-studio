@@ -437,7 +437,9 @@ def clip_build(picks: List[str], manual_urls: str, model: str, all_clips: bool, 
             seen.add(link)
             urls.append(link)
     if not urls:
-        raise ValueError("Select at least one video source (or paste a link manually).")
+        # Generators cannot be wrapped with _friendly (the body runs at iteration
+        # time), so every raise below must be a gr.Error to be readable in the UI.
+        raise gr.Error("Select at least one video source (or paste a link manually).")
     shots, sources_needed = estimate_needs(float(video_duration), float(clip_seconds))
     target_clips = int(shots * 1.5)
     client = OpenRouterClient()
@@ -483,8 +485,14 @@ def clip_build(picks: List[str], manual_urls: str, model: str, all_clips: bool, 
             pass
     thread.join()
     if "error" in result:
-        raise result["error"]
+        exc = result["error"]
+        detail = str(exc).strip() or exc.__class__.__name__
+        raise gr.Error("%s: %s" % (exc.__class__.__name__, detail[:400])) from exc
     library = result["library"]
+    if not library["clips"]:
+        detail = " / ".join(library.get("errors", [])[:3]) or (
+            "nothing was downloaded: check the sources and the disk space")
+        raise gr.Error("Step 5 produced no clips: %s" % detail[:400])
     status_lines.append("- [%ds] done" % int(time_lib.time() - started))
     session["library"] = library
     picks_all = library["clips"] + library["frames"]

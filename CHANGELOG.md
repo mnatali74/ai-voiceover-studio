@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **Step 5 (download, cut and classify) errors are now readable in the UI**: the button runs as a
+  streaming generator, which bypassed the friendly-error wrapper, so failures appeared as a bare
+  `Error` toast. Every failure now surfaces with its class and detail (for example a missing
+  `yt-dlp` or OpenRouter key), and if no clip is produced at all the per-source failures are
+  reported directly in the popup instead of vanishing.
+- **Colab: step 5 works out of the box**: the notebook now installs the `clip` extra (yt-dlp,
+  needed by the default YouTube + Commons sources) and prints an explicit `yt-dlp OK` /
+  `ffprobe OK` check at the end of the installation cell.
 - **The narration is no longer rewritten at clip selection**: with the guided wizard, the
   step-1 narration is used exactly as written — the model only pairs each paragraph with the
   best catalog clip (paragraphs without a fitting clip render as animated text, so the video
