@@ -24,6 +24,11 @@ All notable changes to this project are documented here. The format follows
   usual script, quick preview and final render.
 
 ### Fixed
+- **Colab keeps re-running an old build**: since the package version did not change between
+  commits, `pip install pkg @ git+…` answered "already satisfied" and the notebook silently
+  ran the previous code. The notebook now force-reinstalls the package from Git on every run
+  and prints the installed version right after, and the version was bumped to 0.4.0 with the
+  new wizard/tabs to make updates visible at a glance.
 - **The video-wizard steps were nested inside the AI Illustrations tab**: when that tab was
   added, the `Video wizard` tab opener was lost in the refactoring, so the wizard's entire
   step list appeared — after the final render — as a continuation of the AI Illustrations
