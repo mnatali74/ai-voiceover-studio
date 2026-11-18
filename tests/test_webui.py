@@ -708,7 +708,7 @@ def test_gf_generate_and_assemble_full_cycle(tmp_path, monkeypatch):
     session = new_session(tmp_path)
     yields = list(gf_generate("some/model", "Acquerello", "", "16:9",
                               "Field, ears left\nField, ears upright\nField, ears right",
-                              "AI frames", "", "m", "", session))
+                              "AI frames", "", "m", "", "v/model", 5, session))
     status, files = yields[-1]
     assert "**3**/3 frame image(s) generated" in status
     assert len(files) == 3
@@ -732,7 +732,7 @@ def test_gf_generate_needs_two_prompts(tmp_path, monkeypatch):
     session = new_session(tmp_path)
     with pytest.raises(gr.Error, match="At least two frame prompts"):
         list(gf_generate("m", "Acquerello", "", "16:9", "Only one prompt", "AI frames", "", "m", "",
-                         session))
+                         "v/model", 5, session))
 
 
 def test_gf_generate_needs_text_model_row_for_lottie(tmp_path, monkeypatch):
@@ -753,7 +753,7 @@ def test_gf_generate_needs_text_model_row_for_lottie(tmp_path, monkeypatch):
     session = new_session(tmp_path)
     yields = list(gf_generate("img/model", "Acquerello", "", "16:9", "",
                               "Motion design (Lottie)", "A bouncing dot, seamless loop",
-                              "m", "Cartoon character", session))
+                              "m", "Cartoon character", "v/model", 5, session))
     status, files = yields[-1]
     assert "Lottie animation ready" in status
     assert files == []
@@ -800,7 +800,7 @@ def test_gf_procedural_mode_one_image_no_drift(tmp_path, monkeypatch):
     # No planned prompts: the scene comes straight from step 1's prompt box.
     yields = list(gf_generate("some/model", "Acquerello", "", "16:9", "",
                               "One image + procedural motion", "Wheat field at sunset", "m", "",
-                              session))
+                              "v/model", 5, session))
     status, files = yields[-1]
     assert "**1**/1 frame image(s) generated" in status
     assert "procedural" in status
@@ -816,3 +816,38 @@ def test_gf_procedural_mode_one_image_no_drift(tmp_path, monkeypatch):
     with Image.open(gif) as g:
         assert g.n_frames >= 8
         assert g.info.get("loop", 0) == 0
+
+
+def test_gf_ai_clip_mode_generates_an_mp4(tmp_path, monkeypatch):
+    """"AI clip (text-to-video)' mode: the video model animates everything inside the
+    scene and returns a real MP4 that goes straight into the video pipeline."""
+    import voiceover_studio.ai_clips as ai_clips
+    from voiceover_studio.webui import gf_assemble, gf_generate
+
+    def fake_clip(client, model, prompt, dest_base, **kwargs):
+        assert model == "v/model"
+        assert "wheat" in prompt.lower()
+        assert int(kwargs["duration"]) == 5
+        assert kwargs["aspect_ratio"] == "16:9"
+        kwargs.setdefault("progress", None)
+        dest_base = Path(str(dest_base) + ".mp4")
+        dest_base.parent.mkdir(parents=True, exist_ok=True)
+        dest_base.write_bytes(b"\x00\x00\x00\x18ftypisom")
+        return dest_base
+
+    monkeypatch.setattr(ai_clips, "generate_video_clip", fake_clip)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    yields = list(gf_generate("img/model", "Acquerello", "", "16:9",
+                              "A locked shot of wheat swaying at sunset",
+                              "AI clip (text-to-video)", "Campo di grano", "m", "",
+                              "v/model", 5, session))
+    status, files = yields[-1]
+    assert "AI clip ready" in status
+    assert files == []
+    assert Path(session["gf_clip"]).name == "ai_clip.mp4"
+    # gif is None (not an error): a real MP4 needs no GIF assembly
+    status2, out, extras = gf_assemble(1.2, 2, True, "AI clip (text-to-video)", "wind", 1.0,
+                                       session)
+    assert "Nothing to assemble" in status2
+    assert out == session["gf_clip"] and extras == [session["gf_clip"]]

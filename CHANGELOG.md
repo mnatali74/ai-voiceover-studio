@@ -7,6 +7,19 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **GIF studio, 'AI clip (text-to-video)' mode — a real generative video model animates
+  everything INSIDE the scene**. While the GIF modes draw frames and the motion is
+  assembled locally (Lottie vectors, procedural warp, AI frames), OpenRouter now also
+  exposes its **async video API**: `POST /api/v1/videos` (submit) -> poll the job ->
+  download a normal **MP4**. New module `ai_clips.py`: `plan_clip_prompt` (the text model
+  turns the scene + movement into ONE vivid cinematic prompt — camera, action, lighting,
+  looping-friendly, editable), `generate_video_clip` (submit/poll/download with a progress
+  callback for the live log, `ProviderError` on failed/expired jobs and on timeout), and
+  the `VIDEO_MODELS` dropdown (Veo 3.1 Lite, Seedance 2.0 Fast, Grok Imagine 1.5 Lite, Wan
+  2.7, Hailuo 2.3 — paid per second, so the UI exposes a 4-15 s duration slider). The MP4
+  goes STRAIGHT into the video pipeline: the render engine already loops video shots
+  (`-stream_loop -1`), so this is the mode where the AI truly animates the objects inside
+  the scene (walking animals, moving characters), at the cost of a per-second price.
 - **GIF studio, 'Cartoon character' Lottie kind — the AI animates real vector characters**.
   In 'Motion design (Lottie)' mode the user can now pick the animation kind: **'Cartoon
   character'** (default; the model builds the character from shape groups — head, torso,

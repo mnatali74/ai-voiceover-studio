@@ -20,6 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .ai_clips import VIDEO_MODELS
 from .ai_video import DEFAULT_MODELS, ILLUSTRATION_MODELS, ILLUSTRATION_STYLES
 from .overlays import CARD_STYLES
 from .illustrations import ASPECT_SIZES, LOOP_MOTIONS, MOTIONS
@@ -860,8 +861,22 @@ def ill_build_script(narration: str, session: Dict[str, Any]) -> Tuple[str, str]
 def gf_plan(prompt: str, motion: str, n_frames: int, model: str, mode: str,
             session: Dict[str, Any]) -> Tuple[str, str]:
     """GIF studio step 1: scene + movement -> one editable prompt per cycle frame."""
+    from .ai_clips import plan_clip_prompt
     from .ai_video import OpenRouterClient, best_value_models
     from .illustrations import plan_motion_frames
+    if (mode or "") == "AI clip (text-to-video)":
+        if not (prompt or "").strip():
+            raise ValueError("Describe the scene of the clip first (step 1).")
+        client = OpenRouterClient()
+        if model in ("", "best value (auto)"):
+            model = best_value_models(client)[0]
+        clip_prompt = plan_clip_prompt(client, model, prompt, motion)
+        session["gf_clip_prompt"] = clip_prompt
+        return ("**AI clip mode**: the text model turned the scene into ONE cinematic "
+                "text-to-video prompt (below, editable): a real generative video model "
+                "(step 2) will animate **everything inside the scene** — walking animals, "
+                "moving characters — and return a normal MP4 usable as a video shot. "
+                "Edit the prompt, then go to step 2."), clip_prompt
     if (mode or "") == "Motion design (Lottie)":
         return ("**Lottie mode**: no frame planning is needed \u2014 step 2 asks the model to "
                 "WRITE the whole vector animation as professional Lottie JSON (shapes, "
@@ -885,7 +900,8 @@ def gf_plan(prompt: str, motion: str, n_frames: int, model: str, mode: str,
 
 
 def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: str,
-                mode: str, scene: str, text_model: str, toon: str,
+                mode: str, scene: str, text_model: str, toon: str, clip_model: str,
+                clip_duration: float,
                 session: Dict[str, Any]) -> Any:
     """GIF studio step 2 (generator): generate the frame image(s), with a live log."""
     import queue as queue_lib
@@ -895,8 +911,13 @@ def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: s
     from .illustrations import generate_stills
     procedural = (mode or "") == "One image + procedural motion"
     lottie = (mode or "") == "Motion design (Lottie)"
+    ai_clip = (mode or "") == "AI clip (text-to-video)"
     lines = [line.strip() for line in (frames or "").splitlines() if line.strip()]
-    if lottie:
+    if ai_clip:
+        prompts = lines[:1] or [(scene or "").strip()]
+        if not prompts[0]:
+            raise gr.Error("Describe the scene of the animation first (step 1).")
+    elif lottie:
         prompts = [(scene or "").strip()]
         if not prompts[0]:
             raise gr.Error("Describe the scene of the animation first (step 1).")
@@ -913,7 +934,15 @@ def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: s
     session["gf_aspect"] = aspect or "16:9"
     session["gf_mode"] = mode or ""
     out_dir = Path(session["dir"]) / "gif_frames"
-    if lottie:
+    if ai_clip:
+        if clip_model in ("", "best value (auto)"):
+            from .ai_clips import VIDEO_MODELS
+            clip_model = VIDEO_MODELS[0]
+        status_lines = ["AI clip mode: submitting the prompt to the generative video model "
+                        "**%s** (%ds, %s, video-only) — it animates EVERYTHING inside the "
+                        "scene and returns a normal MP4. This takes 1-5 minutes."
+                        % (clip_model, int(clip_duration), aspect or "16:9")]
+    elif lottie:
         if text_model in ("", "best value (auto)"):
             from .ai_video import best_value_models
             text_model = best_value_models(client)[0]
@@ -939,7 +968,15 @@ def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: s
 
     def worker() -> None:
         try:
-            if lottie:
+            if ai_clip:
+                from .ai_clips import generate_video_clip
+                clip = generate_video_clip(client, clip_model, prompts[0],
+                                           out_dir / "ai_clip", duration=int(clip_duration),
+                                           aspect_ratio=aspect or "16:9",
+                                           poll_seconds=15.0, timeout=900.0,
+                                           progress=track)
+                result["clip"] = str(clip)
+            elif lottie:
                 from .lottie_motion import LOTTIE_FRAMERATE, generate_lottie
                 width, height = ASPECT_SIZES.get(aspect or "16:9", (960, 540))
                 data = generate_lottie(client, text_model, prompts[0],
@@ -977,6 +1014,16 @@ def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: s
         exc = result["error"]
         detail = str(exc).strip() or exc.__class__.__name__
         raise gr.Error("%s: %s" % (exc.__class__.__name__, detail[:400])) from exc
+    if "clip" in result:
+        session["gf_clip"] = result["clip"]
+        session["gf_lottie"] = None
+        session["gf_stills"] = []
+        status_lines.append("- [%ds] done" % int(time_lib.time() - started))
+        yield ("AI clip ready: **%s** — a real MP4 generated by the video model, with the "
+               "motion of the objects INSIDE the scene animated by AI. Step 3 is not "
+               "needed here: the render engine already loops MP4 shots, so the clip can "
+               "go straight into the video pipeline." % result["clip"]), []
+        return
     if "lottie" in result:
         session["gf_lottie"] = result["lottie"]
         session["gf_stills"] = []
@@ -1007,6 +1054,14 @@ def gf_assemble(loop_seconds: float, blend: int, pingpong: bool, mode: str, pres
                 session: Dict[str, Any]) -> Tuple[str, Optional[str], list]:
     """GIF studio step 3 (local, free): assemble the seamless looping GIF."""
     from .illustrations import LOOP_MOTIONS, animate_loop, build_gif
+    if (mode or "") == "AI clip (text-to-video)":
+        clip = session.get("gf_clip")
+        if not clip or not Path(clip).is_file():
+            raise ValueError("Generate the AI clip first (step 2).")
+        return ("Nothing to assemble: **%s** is already a real MP4 video generated by AI. "
+                "The render engine loops video shots automatically (`-stream_loop`), so "
+                "this clip goes STRAIGHT into the video pipeline as one shot — no GIF, no "
+                "drift, no local animation." % Path(clip).name), str(clip), [str(clip)]
     if (mode or "") == "Motion design (Lottie)":
         from .lottie_motion import lottie_to_gif
         json_path = session.get("gf_lottie")
@@ -1477,8 +1532,8 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                     outputs=[ill_render_status, ill_render_out])
 
         with gr.Tab("GIF studio"):
-            gr.Markdown("Dedicated workshop: **only seamless looping animated GIFs**. Three "
-                        "modes:\n\n"
+            gr.Markdown("Dedicated workshop: **only seamless looping animated GIFs**."
+                        "Plus true AI video clips. Four modes:\n\n"
                         "- **Motion design (Lottie)** (professional): the TEXT model "
                         "writes the whole vector animation as Lottie JSON (shapes, lines, "
                         "icons, keyframed motion — the format used in high-end "
@@ -1494,12 +1549,17 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                         "times**, changing only the phase of the movement (wheat ears "
                         "swaying, worms crawling...). Most literal, but the model may "
                         "draw slightly different frames — ping-pong and cross-fades "
-                        "reduce it.\n\n"
+                        "reduce it.\n"
+                        "- **AI clip (text-to-video)**: a real generative video model "
+                        "(Veo, Seedance, Kling, Wan, Hailuo) animates EVERYTHING INSIDE "
+                        "the scene — walking sheep, moving figures — and returns a normal "
+                        "**MP4** usable as a video shot (times the price per second, so "
+                        "plan short clips).\n\n"
                         "Test the animation here; the video steps come later, once the "
                         "GIF looks right. Needs `OPENROUTER_API_KEY`.")
             gf_mode = gr.Radio(
                 choices=["Motion design (Lottie)", "One image + procedural motion",
-                         "AI frames"],
+                         "AI frames", "AI clip (text-to-video)"],
                 value="Motion design (Lottie)", type="value", label="Animation mode")
             with gr.Accordion("Step 1 — Plan the cycle", open=True):
                 with gr.Row():
@@ -1537,8 +1597,16 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                     gf_aspect = gr.Radio(choices=["16:9", "1:1", "9:16"], value="16:9",
                                          label="Aspect ratio")
                 gf_extra = gr.Textbox(label="Extra style details (optional)", lines=1)
+                gf_clip_model = gr.Dropdown(choices=["best value (fisso)"] + list(VIDEO_MODELS),
+                                            value=VIDEO_MODELS[0], allow_custom_value=True,
+                                            visible=False,
+                                            label="Video model (OpenRouter — paid per second, "
+                                                  "~$0.03-0.1/s)")
+                gf_clip_duration = gr.Slider(4, 15, value=5, step=1,
+                                             visible=False,
+                                             label="AI clip duration (s — pays per second)")
                 gf_gen_button = gr.Button("2. Generate the image(s) (paid — 1 call in "
-                                          "procedural mode)", variant="primary")
+                                          "procedural mode, 2 s in Lottie mode)", variant="primary")
                 gf_gen_status = gr.Markdown()
                 gf_stills_files = gr.Files(label="Frame images")
             with gr.Accordion("Step 3 — Assemble the animated GIF", open=False):
@@ -1566,6 +1634,11 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                 gf_gif = gr.File(label="Animated GIF")
                 gf_files = gr.Files(label="Other outputs (Lottie JSON, HTML preview)")
 
+            def _clip_ui(mode: str) -> list:
+                show = bool((mode or "") == "AI clip (text-to-video)")
+                return [gr.update(visible=show), gr.update(visible=show)]
+
+            gf_mode.change(_clip_ui, gf_mode, [gf_clip_model, gf_clip_duration])
             gf_plan_button.click(gf_plan,
                                  inputs=[gf_prompt, gf_motion, gf_n, gf_model, gf_mode,
                                          session],
@@ -1573,7 +1646,7 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
             gf_gen_button.click(gf_generate,
                                 inputs=[gf_image_model, gf_style, gf_extra, gf_aspect,
                                         gf_frames, gf_mode, gf_prompt, gf_model,
-                                        gf_toon, session],
+                                        gf_toon, gf_clip_model, gf_clip_duration, session],
                                 outputs=[gf_gen_status, gf_stills_files])
             gf_build_button.click(gf_assemble,
                                   inputs=[gf_loop, gf_blend, gf_pingpong, gf_mode,

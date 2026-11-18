@@ -227,6 +227,13 @@ cartoon principles (walk cycle with limbs rotating from their joints, body bob, 
   A local step assembles the seamless loop: ping-pong playback (forward + backward)
   guarantees the GIF returns exactly to its starting point, with an adjustable loop duration
   and optional cross-fade frames that smooth out small drifts between the AI-drawn frames.
+- **AI clip (text-to-video)**: instead of assembling the motion locally, a real generative
+  video model (Veo 3.1, Seedance, Kling, Wan, Hailuo — paid per **second** of output)
+  animates **everything INSIDE the scene**: walking animals, moving characters. The text
+  model first turns your scene + movement into ONE cinematic prompt (editable), then the
+  clip job is submitted to OpenRouter's async video API, polled and downloaded as a normal
+  **MP4** — which the render engine already loops (`-stream_loop -1`), so it goes straight
+  into the video pipeline as one shot. Best for hero shots; keep clips short (4-15 s).
 
 Test the GIF in this tab; the video pipeline (voice-over, cards, preview, render) comes
 after, once the motion looks right.
