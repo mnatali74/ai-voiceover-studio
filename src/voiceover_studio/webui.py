@@ -857,6 +857,117 @@ def ill_build_script(narration: str, session: Dict[str, Any]) -> Tuple[str, str]
 
 
 @_friendly
+def gf_plan(prompt: str, motion: str, n_frames: int, model: str,
+            session: Dict[str, Any]) -> Tuple[str, str]:
+    """GIF studio step 1: scene + movement -> one editable prompt per cycle frame."""
+    from .ai_video import OpenRouterClient, best_value_models
+    from .illustrations import plan_motion_frames
+    if not (prompt or "").strip():
+        raise ValueError("Describe the subject of the animation (step 1).")
+    client = OpenRouterClient()
+    if model in ("", "best value (auto)"):
+        model = best_value_models(client)[0]
+    prompts = plan_motion_frames(client, model, prompt, motion, int(n_frames))
+    session["gf_prompts"] = prompts
+    return ("**%d** frame prompts planned with model **%s**: the same scene, only the "
+            "**phase of the movement** changes, and the cycle connects back to the first "
+            "frame so the GIF loops seamlessly. Edit any line before generating."
+            % (len(prompts), model)), "\n".join(prompts)
+
+
+def gf_generate(image_model: str, style: str, extra: str, aspect: str, frames: str,
+                session: Dict[str, Any]) -> Any:
+    """GIF studio step 2 (generator): generate every frame image, with a live log."""
+    import queue as queue_lib
+    import threading
+    import time as time_lib
+    from .ai_video import OpenRouterClient
+    from .illustrations import generate_stills
+    prompts = [line.strip() for line in (frames or "").splitlines() if line.strip()]
+    if len(prompts) < 2:
+        raise gr.Error("At least two frame prompts are needed: run step 1 or write them "
+                       "one per line (same scene, different movement phase).")
+    client = OpenRouterClient()
+    session["gf_aspect"] = aspect or "16:9"
+    out_dir = Path(session["dir"]) / "gif_frames"
+    status_lines = ["Generating **%d** frame image(s) with **%s** (style **%s**)... "
+                    "keep the scene identical, only the movement changes."
+                    % (len(prompts), image_model, style or "none")]
+    yield ("\n".join(status_lines), gr.update())
+    messages: queue_lib.Queue = queue_lib.Queue()
+    progress_tail: List[str] = []
+
+    def track(msg: str) -> None:
+        progress_tail.append(msg)
+        messages.put(msg)
+
+    result: Dict[str, Any] = {}
+
+    def worker() -> None:
+        try:
+            result["stills"] = generate_stills(client, image_model, prompts, out_dir,
+                                               style=style, extra=extra, aspect=aspect,
+                                               progress=track)
+        except Exception as exc:
+            result["error"] = exc
+
+    started = time_lib.time()
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        try:
+            messages.get(timeout=1.0)
+            while True:
+                try:
+                    messages.get_nowait()
+                except queue_lib.Empty:
+                    break
+            tail = (" - ".join(progress_tail[-2:]) if progress_tail else "working...")
+            status_lines.append("- [%ds] %s" % (int(time_lib.time() - started), tail))
+            yield ("\n".join(status_lines), gr.update())
+        except queue_lib.Empty:
+            pass
+    thread.join()
+    if "error" in result:
+        exc = result["error"]
+        detail = str(exc).strip() or exc.__class__.__name__
+        raise gr.Error("%s: %s" % (exc.__class__.__name__, detail[:400])) from exc
+    stills, errors = result["stills"]
+    ok = [s for s in stills if s]
+    if len(ok) < 2:
+        raise gr.Error("Not enough frame images were generated (need at least 2, got %d): "
+                       "%s" % (len(ok), " / ".join(errors[:3])[:300]))
+    session["gf_stills"] = stills
+    status_lines.append("- [%ds] done" % int(time_lib.time() - started))
+    status = ("**%d**/%d frames generated.\n\n%s" % (len(ok), len(prompts),
+                                                     "\n".join(status_lines)))
+    for error in errors:
+        status += "\n\n⚠️ %s" % error
+    yield status, [s for s in stills if s]
+
+
+@_friendly
+def gf_assemble(loop_seconds: float, blend: int, pingpong: bool,
+                session: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """GIF studio step 3 (local, free): assemble the frames into a seamless looping GIF."""
+    from .illustrations import build_gif
+    stills = session.get("gf_stills") or []
+    ok = [s for s in stills if s]
+    if len(ok) < 2:
+        raise ValueError("Generate the frame images first (step 2).")
+    gif = build_gif(ok, Path(session["dir"]) / "animations" / "loop", loop_seconds=float(loop_seconds),
+                    blend=int(blend), pingpong=bool(pingpong))
+    frames_n = len(ok) * 2 - 2 if pingpong else len(ok)
+    slots = frames_n + frames_n * int(blend)
+    return ("GIF ready: **%s** — %d frames (%s order), %d cross-fade(s) inserted, loop of "
+            "**%.1f s** that returns to the starting frame with no jump. Watch it a few "
+            "times: if the scene 'wiggles' between frames, raise the cross-fade or lower "
+            "the number of frames; when it looks right, we move to the video steps."
+            % (gif.name, frames_n, "ping-pong" if pingpong else "forward", int(blend) * frames_n,
+               float(loop_seconds))), str(gif)
+
+
+@_friendly
 def wizard_narrate(prompt: str, model: str, language: str, duration: float,
                    session: Dict[str, Any]) -> Tuple[str, str, str, Any]:
     """Step 1: prompt -> narration script + subtitles advice + reading-time duration."""
@@ -1275,7 +1386,78 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                             session],
                                     outputs=[ill_render_status, ill_render_out])
 
+        with gr.Tab("GIF studio"):
+            gr.Markdown("Dedicated workshop: **only seamless looping animated GIFs**, made of "
+                        "real AI frames — the image model draws the **same scene N times**, "
+                        "changing only the phase of the movement (wheat ears swaying, worms "
+                        "crawling...), and the frames play forward-and-back so the loop "
+                        "always returns to its starting point with **no discontinuity**. "
+                        "Test the animation here; the video steps come later, once the GIF "
+                        "looks right. Needs `OPENROUTER_API_KEY`.")
+            with gr.Accordion("Step 1 — Plan the cycle", open=True):
+                with gr.Row():
+                    gf_prompt = gr.Textbox(label="Scene of the animation", lines=2,
+                                           placeholder="Es.: un campo di grano al tramonto, "
+                                                       "inquadratura fissa dal basso")
+                    gf_motion = gr.Textbox(label="What moves and how", lines=2,
+                                           placeholder="Es.: le spighe ondeggiano avanti e "
+                                                       "indietro nel vento")
+                with gr.Row():
+                    gf_n = gr.Slider(2, 8, value=4, step=1,
+                                     label="Images in the cycle (more = smoother, more "
+                                           "expensive)")
+                    gf_model = gr.Dropdown(choices=["best value (auto)"] + DEFAULT_MODELS,
+                                           value="best value (auto)",
+                                           allow_custom_value=True,
+                                           label="Planning model (OpenRouter, text)")
+                gf_plan_button = gr.Button("1. Plan the cycle frames (AI)",
+                                           variant="primary")
+                gf_plan_status = gr.Markdown()
+                gf_frames = gr.Textbox(label="Frame prompts (one per line, editable — same "
+                                             "scene, different movement phase)", lines=6)
+            with gr.Accordion("Step 2 — Generate the frames", open=False):
+                with gr.Row():
+                    gf_image_model = gr.Dropdown(choices=list(ILLUSTRATION_MODELS),
+                                                 value=ILLUSTRATION_MODELS[0],
+                                                 allow_custom_value=True,
+                                                 label="Image model (OpenRouter)")
+                    gf_style = gr.Dropdown(choices=list(ILLUSTRATION_STYLES),
+                                           value="Infografica illustrata", label="Style")
+                    gf_aspect = gr.Radio(choices=["16:9", "1:1", "9:16"], value="16:9",
+                                         label="Aspect ratio")
+                gf_extra = gr.Textbox(label="Extra style details (optional)", lines=1)
+                gf_gen_button = gr.Button("2. Generate the frame images (one API call per "
+                                          "frame — paid)", variant="primary")
+                gf_gen_status = gr.Markdown()
+                gf_stills_files = gr.Files(label="Frame images")
+            with gr.Accordion("Step 3 — Assemble the animated GIF", open=False):
+                with gr.Row():
+                    gf_loop = gr.Slider(0.4, 3.0, value=1.2, step=0.1,
+                                        label="Loop duration (s)")
+                    gf_blend = gr.Slider(0, 5, value=2, step=1,
+                                         label="Cross-fade frames between frames (0 = hard "
+                                               "switch, higher = smoother if the model "
+                                               "drifted)")
+                gf_pingpong = gr.Checkbox(value=True,
+                                          label="Ping-pong (forward + backward: the loop "
+                                                "returns exactly to the start, seamless)")
+                gf_build_button = gr.Button("3. Assemble the animated GIF (local, free)",
+                                            variant="primary")
+                gf_status = gr.Markdown()
+                gf_gif = gr.File(label="Animated GIF")
 
+            gf_plan_button.click(gf_plan,
+                                 inputs=[gf_prompt, gf_motion, gf_n, gf_model, session],
+                                 outputs=[gf_plan_status, gf_frames])
+            gf_gen_button.click(gf_generate,
+                                inputs=[gf_image_model, gf_style, gf_extra, gf_aspect,
+                                        gf_frames, session],
+                                outputs=[gf_gen_status, gf_stills_files])
+            gf_build_button.click(gf_assemble,
+                                  inputs=[gf_loop, gf_blend, gf_pingpong, session],
+                                  outputs=[gf_status, gf_gif])
+
+        with gr.Tab("Video wizard"):
             gr.Markdown("Guided flow, one step at a time: the AI writes the narration from "
                         "your prompt, you pick the voice (the video duration follows the "
                         "reading time), the AI describes what each scene should show, you "

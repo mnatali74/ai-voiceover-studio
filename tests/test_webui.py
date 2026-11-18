@@ -661,3 +661,63 @@ def test_ill_build_script_keeps_the_step1_narration(tmp_path):
     assert "Nelle cantine il tempo si ferma." in script
     assert script.count("![](") == 2
     assert "exactly as written in step 1" in status
+
+
+def test_gf_plan_writes_the_cycle_prompts(tmp_path, monkeypatch):
+    import voiceover_studio.illustrations as illustrations
+    from voiceover_studio.webui import gf_plan
+
+    prompts = ["Field, ears left", "Field, ears upright", "Field, ears right"]
+    monkeypatch.setattr(illustrations, "plan_motion_frames",
+                        lambda client, model, prompt, motion, n_frames=4: prompts)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    status, text = gf_plan("Wheat field at sunset", "the ears sway in the wind", 3, "m",
+                           session)
+    assert "loops seamlessly" in status
+    assert text == "Field, ears left\nField, ears upright\nField, ears right"
+    assert session["gf_prompts"] == prompts
+
+
+def test_gf_generate_and_assemble_full_cycle(tmp_path, monkeypatch):
+    import voiceover_studio.illustrations as illustrations
+    from voiceover_studio.webui import gf_assemble, gf_generate
+
+    def fake_stills(client, model, prompts, out_dir, **kwargs):
+        from PIL import Image
+
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        for i in range(len(prompts)):
+            Image.new("RGB", (480, 270), (i * 30, 120, 60)).save(out_dir / ("still_%02d.png" % (i + 1)))
+        kwargs["progress"]("Generating illustration 1/%d" % len(prompts))
+        return [str(out_dir / ("still_%02d.png" % (i + 1))) for i in range(len(prompts))], []
+
+    monkeypatch.setattr(illustrations, "generate_stills", fake_stills)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    yields = list(gf_generate("some/model", "Acquerello", "", "16:9",
+                              "Field, ears left\nField, ears upright\nField, ears right",
+                              session))
+    status, files = yields[-1]
+    assert "**3**/3 frames generated" in status
+    assert len(files) == 3
+    assert session["gf_stills"] == files
+
+    gif_status, gif = gf_assemble(1.0, 1, True, session)
+    assert "ping-pong" in gif_status
+    from PIL import Image
+    with Image.open(gif) as g:
+        # ping-pong: 2*3-2 = 4 base frames, blend=1 inserts one cross-fade per frame
+        assert g.n_frames == (3 * 2 - 2) + (3 * 2 - 2) * 1
+    assert gif.endswith(".gif")
+
+
+def test_gf_generate_needs_two_prompts(tmp_path, monkeypatch):
+    import gradio as gr
+
+    from voiceover_studio.webui import gf_generate
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    with pytest.raises(gr.Error, match="At least two frame prompts"):
+        list(gf_generate("m", "Acquerello", "", "16:9", "Only one prompt", session))

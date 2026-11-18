@@ -155,3 +155,61 @@ def test_gif_shots_render_into_a_video(tmp_path):
     out = tmp_path / "final.mp4"
     render_video(Studio(provider="dummy"), "", script, out, size=(320, 180))
     assert out.is_file() and out.stat().st_size > 10000
+
+
+def test_plan_motion_frames_assembles_the_cycle(fake):
+    from voiceover_studio.illustrations import plan_motion_frames
+    cycle = json.dumps(["Wheat field at sunset, ears leaning left",
+                        "Wheat field at sunset, ears upright",
+                        "Wheat field at sunset, ears leaning right",
+                        "Wheat field at sunset, ears upright again"])
+    prompts = plan_motion_frames(chat_client(fake, cycle), "m",
+                                 "A wheat field at sunset", "the ears sway in the wind", 4)
+    assert len(prompts) == 4
+    assert all(p.startswith("Wheat field at sunset") for p in prompts)
+
+
+def test_plan_motion_frames_needs_a_scene(fake):
+    from voiceover_studio.illustrations import plan_motion_frames
+    with pytest.raises(ValueError):
+        plan_motion_frames(chat_client(fake, "[]"), "m", "  ", "sway")
+
+
+def test_build_gif_pingpong_returns_to_the_start(tmp_path):
+    from voiceover_studio.illustrations import build_gif
+    frames = []
+    for i in range(4):
+        im = Image.new("RGB", (320, 180), (i * 20, 120, 200))
+        path = tmp_path / ("f_%d.png" % i)
+        im.save(path)
+        frames.append(path)
+    dest = build_gif(frames, tmp_path / "loop", loop_seconds=1.0)
+    with Image.open(dest) as gif:
+        assert gif.n_frames == 2 * 4 - 2  # forward + backward, endpoints not doubled
+    first = frames[0].read_bytes()
+    assert dest.is_file()
+
+
+def test_build_gif_blend_inserts_crossfades(tmp_path):
+    from voiceover_studio.illustrations import build_gif
+    frames = []
+    for i in range(3):
+        im = Image.new("RGB", (320, 180), (i * 40 + 10, 100, 30))
+        path = tmp_path / ("b_%d.png" % i)
+        im.save(path)
+        frames.append(path)
+    plain = build_gif(frames, tmp_path / "plain", loop_seconds=1.0)
+    with Image.open(plain) as gif:
+        plain_n = gif.n_frames
+    blended = build_gif(frames, tmp_path / "soft", loop_seconds=1.0, blend=2)
+    with Image.open(blended) as gif:
+        assert gif.n_frames == plain_n + plain_n * 2
+    assert plain.read_bytes() != blended.read_bytes()
+
+
+def test_build_gif_needs_two_frames(tmp_path):
+    from voiceover_studio.illustrations import build_gif
+    single = tmp_path / "only.png"
+    Image.new("RGB", (64, 64), (1, 2, 3)).save(single)
+    with pytest.raises(ValueError):
+        build_gif([single], tmp_path / "loop")

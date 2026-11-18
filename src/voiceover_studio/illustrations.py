@@ -208,3 +208,84 @@ def build_slide_script(slides: List[Dict[str, Any]], narration: str, title: str 
             lines += ["![](%s)" % gifs[i], ""]
         lines += [paragraph, ""]
     return "\n".join(lines).strip() + "\n"
+
+
+MOTION_SYSTEM = """You are designing a **seamlessly looping animated GIF** made of \
+AI-generated frames. The user gives you a scene and what moves in it (for example: wheat \
+ears swaying in the wind, or worms crawling). Plan how many frames are requested.
+
+For EVERY frame write the prompt for the image model. All the frame prompts must describe \
+the **same exact scene**: same camera, same composition, same crop, same colors and \
+lighting, same background. The ONLY thing that changes from one frame to the next is the \
+**phase of the movement** of the moving element, progressing smoothly through the cycle \
+(start position ... middle ... end position). The last frame's movement phase must connect \
+back to the first frame's phase (full cycle). Keep each prompt short and identical to the \
+previous one except for the movement phrase.
+
+Answer ONLY with a JSON list of strings: exactly one prompt per frame, in cycle order."""
+
+
+def plan_motion_frames(client: Any, model: str, prompt: str, motion: str,
+                       n_frames: int = 4) -> List[str]:
+    """Scene + movement -> N frame prompts of the same scene at cyclic motion phases."""
+    from .ai_video import _parse_json
+    if not (prompt or "").strip():
+        raise ValueError("Describe the subject of the animation (step 1).")
+    content = client.chat(model, [
+        {"role": "system", "content": MOTION_SYSTEM},
+        {"role": "user", "content": ("Scene: %s\nMovement: %s\nFrames in the cycle: %d"
+                                     % (prompt.strip(), motion.strip() or "gentle sway",
+                                        n_frames))}])
+    raw = _parse_json(content)
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError("The model did not return the frame prompts.")
+    prompts = [str(item).strip()[:600] for item in raw if str(item).strip()]
+    while len(prompts) < n_frames:  # pad by cycling the frames the model did return
+        prompts.append(prompts[len(prompts) % max(1, len(prompts))])
+    return prompts[:n_frames]
+
+
+def build_gif(frames: List[Any], dest_base: Any, *, loop_seconds: float = 1.2,
+              blend: int = 0, pingpong: bool = True) -> Path:
+    """Assemble frame images into a seamlessly looping animated GIF.
+
+    With ``pingpong`` the sequence plays forward then backward (1..N..1), so the loop
+    always returns to its exact starting point with no discontinuity. ``blend`` inserts
+    that many cross-fade frames between consecutive frames to smooth out any difference
+    the image model introduced (ghosting is the trade-off, keep it low)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ConfigError("Pillow is required to assemble GIFs: pip install Pillow.") from None
+    frames = [Path(f) for f in frames if f and Path(f).is_file()]
+    if len(frames) < 2:
+        raise ValueError("At least two frame images are needed for an animation "
+                         "(generate them in step 2 first).")
+    with Image.open(frames[0]) as first:
+        size = first.size
+    imgs = []
+    for f in frames:
+        with Image.open(f) as im:
+            img = im.convert("RGB")
+            if img.size != size:
+                img = img.resize(size, Image.LANCZOS)
+            imgs.append(img)
+    order = list(range(len(imgs)))
+    if pingpong:
+        order += list(range(len(imgs) - 2, 0, -1))
+    if blend > 0:
+        blended: List[Image.Image] = []
+        for i, img in enumerate(order):
+            blended.append(imgs[img])
+            nxt = imgs[order[(i + 1) % len(order)]]
+            for j in range(1, blend + 1):
+                blended.append(Image.blend(imgs[img], nxt, j / (blend + 1)))
+        sequence = blended
+    else:
+        sequence = [imgs[i] for i in order]
+    per_frame = max(20, int(round(loop_seconds * 1000 / len(sequence))))
+    dest = Path(str(dest_base) + ".gif")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    pal = [im.convert("P", palette=Image.ADAPTIVE, colors=256) for im in sequence]
+    pal[0].save(dest, save_all=True, append_images=pal[1:], duration=per_frame, loop=0)
+    return dest
