@@ -177,6 +177,26 @@ studio at it: set the cookies field in the tab, or `VOICEOVER_YTDLP_COOKIES=/pat
 or `VOICEOVER_YTDLP_COOKIES_FROM_BROWSER=chrome`. Extra:
 `pip install "ai-voiceover-studio[clip]"`; needs ffmpeg.
 
+## AI Illustrations: clips-free videos made only of AI drawings
+
+The *AI Illustrations* tab builds the whole video **without any video clip**: every scene is an
+AI-generated illustration brought to life. The AI writes the narration from your prompt (one
+paragraph per scene, edit at will), then describes **one concrete image prompt per paragraph**
+(editable, one per line); an OpenRouter image model generates the illustrations with a chosen
+**artistic style** — all the presets from the illustration notebooks: *Infografica illustrata*,
+*Vettoriale piatto*, *Schema botanico*, *Acquerello*, *Gouache*, *Tempera*, *Fumetto*,
+*Pennarelli*, *Matite colorate*, *Carboncino*, *Gessetti*, *Linoleografia*, *Collage di carta*…
+— an optional free-text style detail and a 16:9 / 1:1 / 9:16 aspect ratio (SVG answers are
+rasterized automatically when [cairosvg](https://cairosvg.org) is installed). To avoid the
+static-slideshow look each picture is **animated into a looping GIF with a Ken Burns move**
+(push-in, pan, pull-out or pan + rise — drawn locally with Pillow, free and instant), and the
+**text, frames and symbols** from the overlay design are **baked in superimposition** on every
+frame as the same local transparent cards used by the wizard (title, bullet points, vector
+icons, accent lines). The GIFs loop, so in the final video every shot keeps moving for its
+whole duration; the script keeps the step-1 narration **exactly as written** (one
+`![](slide_NN.gif)` line per scene), then you get the fast silent preview and the final render
+with the narrator voice, transitions and captions of your choice.
+
 ## Why this exists
 
 Most voiceover workflows for YouTube explainers, tutorials and faceless channels look the same: write a script, paste it paragraph by paragraph into a TTS tool, download a pile of clips, line them up in an editor, then transcribe everything again to get captions. AI Voiceover Studio does that whole loop from a plain Markdown file, reproducibly, so a script edit means re-running one command — and only the lines you changed are generated again.

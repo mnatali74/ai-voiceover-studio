@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **AI Illustrations tab: clips-free videos made only of AI drawings, animated**. The AI writes
+  the narration, describes one image prompt per scene (editable, one per line), an OpenRouter
+  image model generates the illustrations (20+ artistic style presets, free-text style detail,
+  16:9/1:1/9:16, SVG answers rasterized via cairosvg when installed), and each picture is
+  locally animated into a **looping Ken Burns GIF** (push-in / pan / pull-out / pan + rise) with
+  the text/icon cards **baked in superimposition**, so the shots stay in motion for their whole
+  duration. The GIFs are rendered as normal video shots by the unchanged engine, with the
+  usual script, quick preview and final render.
+
 ### Fixed
 - **Step 5 (download, cut and classify) errors are now readable in the UI**: the button runs as a
   streaming generator, which bypassed the friendly-error wrapper, so failures appeared as a bare

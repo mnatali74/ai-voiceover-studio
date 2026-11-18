@@ -68,12 +68,42 @@ ILLUSTRATION_STYLES = {
                          "semplici, nessuna sfumatura, sfondo chiaro. ",
     "Schema botanico": "Tavola illustrata in stile manuale botanico, linee sottili precise, "
                        "colori naturali tenui, sfondo color carta antica. ",
+    "Quaderno di campo": "Pagina di quaderno di campo con schizzo a matita colorata, tratti "
+                         "rapidi, sfondo color carta crema. ",
     "Acquerello": "Illustrazione ad acquerello morbido, colori che sfumano, texture della "
                   "carta, sfondo bianco. ",
+    "Gouache": "Illustrazione a gouache, colori piatti e opachi, pennellate visibili, "
+               "palette calda e morbida. ",
+    "Tempera": "Illustrazione a tempera, colori pieni e coprenti, pennellate decise, "
+               "aspetto da dipinto naif. ",
     "Fumetto": "Illustrazione in stile fumetto, contorni neri decisi, colori piatti con "
                "ombreggiature semplici. ",
+    "Pennarelli": "Illustrazione a pennarelli colorati, contorni netti, riempimenti vivaci "
+                  "con leggere sovrapposizioni, sfondo bianco. ",
     "Schizzo a colori": "Illustrazione in stile schizzo a colori, linee a matita visibili, "
                         "colori tenui, sfondo chiaro. ",
+    "Matite colorate": "Illustrazione a matite colorate, tratteggio incrociato visibile, "
+                       "colori sfumati per sovrapposizione, sfondo bianco. ",
+    "Carboncino": "Disegno a carboncino su carta, tratti scuri e sfumati, forti contrasti "
+                  "di luce e ombra, bianco e nero. ",
+    "Inchiostro e colore e penna": "Illustrazione a penna e inchiostro con riempimenti di "
+                                    "colore pastello, sfondo chiaro. ",
+    "Gessetti colorati": "Illustrazione a gessetti colorati su carta ruvida, tratti morbidi "
+                         "e polverosi, colori vivaci sfumati con le dita, texture granulosa "
+                         "visibile. ",
+    "Gessetto su lavagna": "Disegno a gessetto bianco e colorato su lavagna nera, tratti "
+                            "polverosi, aspetto da lavagna di scuola o di locale. ",
+    "Pastelli a olio": "Illustrazione a pastelli a olio, tratti grassi e materici, colori "
+                        "saturi sovrapposti, texture della carta visibile. ",
+    "Pastelli a cera (stile bambino)": "Illustrazione a pastelli a cera, tratti semplici e "
+                                        "un po' irregolari, colori brillanti, sfondo bianco, "
+                                        "stile da disegno per bambini. ",
+    "Linoleografia": "Illustrazione in stile linoleografia, forme nette, contrasti forti, "
+                     "due o tre colori piatti, texture di stampa visibile. ",
+    "Acquaforte / incisione": "Illustrazione in stile incisione antica, tratteggio fitto a "
+                               "inchiostro, aspetto da stampa botanica d'epoca. ",
+    "Collage di carta": "Illustrazione in stile collage di carta ritagliata, forme semplici "
+                         "sovrapposte, colori piatti, bordi leggermente irregolari. ",
 }
 
 
@@ -124,9 +154,11 @@ class OpenRouterClient:
         except (KeyError, IndexError, TypeError) as exc:
             raise ProviderError("Unexpected OpenRouter response shape: %s" % exc) from None
 
-    def image(self, model: str, prompt: str, aspect_ratio: Optional[str] = None) -> List[str]:
+    def image(self, model: str, prompt: str, aspect_ratio: Optional[str] = None,
+              modalities: Optional[List[str]] = None) -> List[str]:
         """Image generation: returns the image URLs (data: or https:) of the answer."""
-        body: Dict[str, Any] = {"model": model, "modalities": ["image"],
+        body: Dict[str, Any] = {"model": model,
+                                "modalities": list(modalities or ["image"]),
                                 "messages": [{"role": "user", "content": prompt}]}
         if aspect_ratio:
             body["image_config"] = {"aspect_ratio": aspect_ratio}
@@ -360,19 +392,43 @@ def _image_extension(raw: bytes) -> str:
     raise ProviderError("Unrecognized image format (first bytes: %r)" % raw[:12])
 
 
+def _rasterize_svg(raw: bytes, width: int = 1600) -> bytes:
+    """SVG -> PNG bytes via cairosvg when it is installed (Colab notebooks have it)."""
+    try:
+        import cairosvg
+    except ImportError:
+        raise ProviderError("The model returned an SVG image: install cairosvg to use it "
+                            "(pip install cairosvg), or pick a different image model.") from None
+    try:
+        return cairosvg.svg2png(bytestring=raw, output_width=width)
+    except Exception as exc:
+        raise ProviderError("The model returned an invalid SVG image: %s" % str(exc)[:200]) \
+            from None
+
+
 def generate_illustration(client: OpenRouterClient, prompt: str, dest_base: Path,
                           model: str = ILLUSTRATION_MODELS[0], style: str = "",
-                          aspect_ratio: str = "16:9") -> Path:
-    """Generate one illustration with an OpenRouter image model, saved as dest_base.<ext>."""
-    text = (ILLUSTRATION_STYLES.get(style, "") + (prompt or "").strip()).strip()
+                          aspect_ratio: str = "16:9", extra: str = "") -> Path:
+    """Generate one illustration with an OpenRouter image model, saved as dest_base.<ext>.
+
+    ``style`` picks a preset prefix from ``ILLUSTRATION_STYLES``; ``extra`` is any free-text
+    style detail the user adds on top. Some models reject ``image_config`` or the pure
+    "image" modality: both fall back automatically before giving up."""
+    parts = (ILLUSTRATION_STYLES.get(style, ""), (extra or "").strip(), (prompt or "").strip())
+    text = " ".join(p for p in parts if p).strip()
     if not text:
         raise ValueError("Describe what the illustration should show.")
-    try:
-        urls = client.image(model, text, aspect_ratio)
-    except ProviderError:
-        if not aspect_ratio:
-            raise
-        urls = client.image(model, text, None)
+    urls: List[str] = []
+    for aspect, mods in ((aspect_ratio, ["image"]), (None, ["image"]),
+                         (aspect_ratio, ["image", "text"])):
+        try:
+            urls = client.image(model, text, aspect, mods)
+        except ProviderError:
+            if aspect is None:
+                raise
+            continue
+        if urls:
+            break
     for url in urls:
         try:
             if url.startswith("data:"):
@@ -384,6 +440,12 @@ def generate_illustration(client: OpenRouterClient, prompt: str, dest_base: Path
             continue
         if not raw:
             continue
+        head = raw.lstrip()[:512].lower()
+        if b"<svg" in head or head.startswith(b"<?xml"):
+            try:
+                raw = _rasterize_svg(raw)
+            except ProviderError:
+                continue
         try:
             ext = _image_extension(raw)
         except ProviderError:

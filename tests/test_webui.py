@@ -572,3 +572,92 @@ def test_clip_select_falls_back_to_session_narration(tmp_path, monkeypatch):
     session["wizard_narration"] = "Testo dalla sessione."
     status, script, rows = clip_select("enoturismo", "some/model", "auto", 60, 10, session)
     assert captured["narration"] == "Testo dalla sessione."
+
+
+def test_ill_describe_prefills_the_prompts_box(tmp_path, monkeypatch):
+    import voiceover_studio.illustrations as illustrations
+    from voiceover_studio.webui import ill_describe
+
+    monkeypatch.setattr(illustrations, "plan_image_prompts",
+                        lambda client, model, narration, prompt="": [
+                            "Green hills from above", "Barrels in a cellar"])
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    status, text = ill_describe("Colline.\n\nCantine.", "enoturismo", "m", session)
+    assert "one per scene" in status
+    assert text == "Green hills from above\nBarrels in a cellar"
+    assert session["ill_prompts"] == ["Green hills from above", "Barrels in a cellar"]
+
+
+def test_ill_generate_streams_progress_and_saves(tmp_path, monkeypatch):
+    import time as time_lib
+
+    import voiceover_studio.illustrations as illustrations
+    from voiceover_studio.webui import ill_generate
+
+    def fake_stills(client, model, prompts, out_dir, **kwargs):
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        for i, prompt in enumerate(prompts, 1):
+            kwargs["progress"]("Generating illustration %d/%d: %s" % (i, len(prompts), prompt))
+            time_lib.sleep(0.1)
+            Path(str(out_dir / ("still_%02d" % i)) + ".png").write_bytes(b"x")
+            kwargs["progress"]("Illustration %d/%d done (ok)" % (i, len(prompts)))
+        stills = [str(out_dir / ("still_%02d.png" % i)) for i in range(1, len(prompts) + 1)]
+        return stills, []
+
+    monkeypatch.setattr(illustrations, "generate_stills", fake_stills)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    yields = list(ill_generate("recraft/recraft-v4.1-flash-v2", "Acquerello", "",
+                               "16:9", "Hills from above\nBarrels in a cellar", session))
+    status, files = yields[-1]
+    assert "**2**/2 illustrations generated (style **Acquerello**)" in status
+    assert len(files) == 2 and files[0].endswith("still_01.png")
+    assert session["ill_aspect"] == "16:9"
+    assert session["ill_stills"] == files
+
+
+def test_ill_generate_needs_prompts(tmp_path, monkeypatch):
+    import gradio as gr
+
+    from voiceover_studio.webui import ill_generate
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    session = new_session(tmp_path)
+    with pytest.raises(gr.Error, match="Describe the illustrations first"):
+        list(ill_generate("m", "Acquerello", "", "16:9", "  \n ", session))
+
+
+def test_ill_animate_bakes_cards_over_gifs(tmp_path):
+    from PIL import Image
+
+    from voiceover_studio.webui import ill_animate
+
+    session = new_session(tmp_path)
+    still = Path(session["dir"]) / "illustrations" / "still_01.png"
+    still.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (960, 540), (30, 90, 150)).save(still)
+    session["ill_stills"] = [str(still)]
+    session["wizard_narration"] = "Colline infinite al tramonto."
+    session["ill_overlay_plan"] = [{"scene": 1, "title": "Vineyards",
+                                    "bullets": ["Sunny hills"], "icons": ["star"]}]
+    status, gifs = ill_animate("push-in", True, "Scuro", session)
+    assert len(gifs) == 1 and gifs[0].endswith("slide_01.gif")
+    assert Path(gifs[0]).is_file()
+    assert session["ill_slides"][0]["scene"] == 1
+    assert "animated GIF(s) ready" in status
+
+
+def test_ill_build_script_keeps_the_step1_narration(tmp_path):
+    from voiceover_studio.webui import ill_build_script
+
+    session = new_session(tmp_path)
+    narration = "Colline infinite al tramonto.\n\nNelle cantine il tempo si ferma."
+    session["wizard_narration"] = narration
+    session["ill_slides"] = [{"scene": 1, "gif": "slide_01.gif"},
+                             {"scene": 2, "gif": "slide_02.gif"}]
+    status, script = ill_build_script(narration, session)
+    assert script.startswith("![](slide_01.gif)\n\nColline infinite al tramonto.")
+    assert "Nelle cantine il tempo si ferma." in script
+    assert script.count("![](") == 2
+    assert "exactly as written in step 1" in status

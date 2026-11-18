@@ -20,8 +20,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .ai_video import DEFAULT_MODELS
+from .ai_video import DEFAULT_MODELS, ILLUSTRATION_MODELS, ILLUSTRATION_STYLES
 from .overlays import CARD_STYLES
+from .illustrations import MOTIONS
 from .errors import ConfigError, ProviderError, VoiceoverError
 from .providers import available_providers
 
@@ -700,6 +701,162 @@ def clip_illustrate(script_text: str, every: int, style: str, session: Dict[str,
 
 
 @_friendly
+def ill_describe(narration: str, prompt: str, model: str,
+                 session: Dict[str, Any]) -> Tuple[str, str]:
+    """AI-illustrations step 2: one editable image prompt per narration paragraph."""
+    from .ai_video import OpenRouterClient, best_value_models
+    from .illustrations import plan_image_prompts
+    if not (narration or "").strip():
+        raise ValueError("Write the narration first (step 1).")
+    client = OpenRouterClient()
+    if model in ("", "best value (auto)"):
+        model = best_value_models(client)[0]
+    prompts = plan_image_prompts(client, model, narration, prompt)
+    session["ill_prompts"] = prompts
+    return ("**%d** illustration prompts written with model **%s** — one per scene. "
+            "Edit them freely: each line is the description sent to the image model."
+            % (len(prompts), model)), "\n".join(prompts)
+
+
+def ill_generate(image_model: str, style: str, extra: str, aspect: str, descs: str,
+                 session: Dict[str, Any]) -> Any:
+    """AI-illustrations step 3 (generator): one AI image per prompt, with a live log.
+
+    The paid step: every line of the editable prompts box becomes one illustration.
+    Generators are outside _friendly, so every raise here is a gr.Error to stay readable."""
+    import queue as queue_lib
+    import threading
+    import time as time_lib
+    from .ai_video import OpenRouterClient
+    from .illustrations import generate_stills
+    prompts = [line.strip() for line in (descs or "").splitlines() if line.strip()]
+    if not prompts:
+        raise gr.Error("Describe the illustrations first (step 2): one prompt per line.")
+    client = OpenRouterClient()
+    # aspect is remembered so the animation step uses the same frames of the stills
+    session["ill_aspect"] = aspect or "16:9"
+    out_dir = Path(session["dir"]) / "illustrations"
+    status_lines = ["Generating **%d** illustration(s) with **%s** (style **%s**, aspect "
+                    "%s)..." % (len(prompts), image_model, style or "none", aspect)]
+    empty = ([], gr.update())
+    yield ("\n".join(status_lines), *empty)
+    messages: queue_lib.Queue = queue_lib.Queue()
+    progress_tail: List[str] = []
+
+    def track(msg: str) -> None:
+        progress_tail.append(msg)
+        messages.put(msg)
+
+    result: Dict[str, Any] = {}
+
+    def worker() -> None:
+        try:
+            result["stills"] = generate_stills(client, image_model, prompts, out_dir,
+                                               style=style, extra=extra, aspect=aspect,
+                                               progress=track)
+        except Exception as exc:
+            result["error"] = exc
+
+    started = time_lib.time()
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        try:
+            messages.get(timeout=1.0)
+            while True:
+                try:
+                    messages.get_nowait()
+                except queue_lib.Empty:
+                    break
+            tail = (" - ".join(progress_tail[-2:]) if progress_tail else "working...")
+            status_lines.append("- [%ds] %s" % (int(time_lib.time() - started), tail))
+            yield ("\n".join(status_lines), *empty)
+        except queue_lib.Empty:
+            pass
+    thread.join()
+    if "error" in result:
+        exc = result["error"]
+        if isinstance(exc, gr.Error):
+            raise exc
+        detail = str(exc).strip() or exc.__class__.__name__
+        raise gr.Error("%s: %s" % (exc.__class__.__name__, detail[:400])) from exc
+    stills, errors = result["stills"]
+    ok = [s for s in stills if s]
+    if not ok:
+        raise gr.Error("No illustration was generated: %s" % (" / ".join(errors[:3])[:400]))
+    session["ill_stills"] = stills
+    status_lines.append("- [%ds] done" % int(time_lib.time() - started))
+    status = ("**%d**/%d illustrations generated (style **%s**).\n\n%s"
+              % (len(ok), len(prompts), style or "none", "\n".join(status_lines)))
+    for error in errors:
+        status += "\n\n⚠️ %s" % error
+    yield status, [s for s in stills if s]
+
+
+@_friendly
+def ill_overlays(narration: str, prompt: str, model: str, session: Dict[str, Any]
+                 ) -> Tuple[str, List[List[Any]]]:
+    """AI-illustrations step 4: texts, symbols and frames of the cards on each GIF."""
+    from .ai_video import OpenRouterClient, best_value_models
+    from .clips import plan_overlays
+    if not (narration or "").strip():
+        raise ValueError("Write the narration first (step 1).")
+    client = OpenRouterClient()
+    if model in ("", "best value (auto)"):
+        model = best_value_models(client)[0]
+    overlays = plan_overlays(client, model, narration, prompt)
+    session["ill_overlay_plan"] = overlays
+    rows = [[o["scene"], o["title"], "; ".join(o["bullets"]), ", ".join(o["icons"])]
+            for o in overlays]
+    return ("**%d** card designs ready with model **%s** — title, points and icons drawn "
+            "locally (text, vector icons, accent lines — not AI images) and baked over the "
+            "animated GIFs in the next step." % (len(overlays), model)), rows
+
+
+@_friendly
+def ill_animate(motion: str, with_cards: bool, card_style: str,
+                session: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """AI-illustrations step 5 (local, free): Ken Burns GIFs with the cards baked in."""
+    from .illustrations import _paragraphs, animate_slides
+    stills = session.get("ill_stills")
+    if not stills or not any(stills):
+        raise ValueError("Generate the illustrations first (step 3).")
+    paragraphs = _paragraphs(session.get("wizard_narration") or "")
+    out_dir = Path(session["dir"]) / "illustrations"
+    log: List[str] = []
+    slides, errors = animate_slides(stills, out_dir, paragraphs=paragraphs,
+                                    aspect=session.get("ill_aspect", "16:9"),
+                                    motion=motion, overlay_plan=session.get("ill_overlay_plan"),
+                                    with_cards=bool(with_cards), card_style=card_style,
+                                    progress=lambda msg: log.append("- %s" % msg))
+    if not slides:
+        raise ValueError("No GIF could be created: %s" % (" / ".join(errors[:3]) or
+                                                           "unknown error"))
+    session["ill_slides"] = slides
+    status = ("**%d** animated GIF(s) ready: Ken Burns move (**%s**), card style **%s**. "
+              "The GIFs loop, so the shots never look static — build the script and run "
+              "the quick preview to check the flow." % (len(slides), motion, card_style))
+    for error in errors:
+        status += "\n\n⚠️ %s" % error
+    return status, [s["gif"] for s in slides]
+
+
+@_friendly
+def ill_build_script(narration: str, session: Dict[str, Any]) -> Tuple[str, str]:
+    """AI-illustrations step 6: narration + GIF slideshow → final script (text verbatim)."""
+    from .illustrations import build_slide_script
+    slides = session.get("ill_slides") or []
+    if not slides:
+        raise ValueError("Animate the illustrations first (step 5).")
+    script = build_slide_script(slides, (narration or "").strip())
+    session["ill_script"] = script
+    return ("Script built with **%d** animated GIF shot(s). The narration below is "
+            "**exactly as written in step 1** — only the ``![](...)`` media lines were "
+            "added; edit freely, then preview." % len(slides)), script
+
+
+
+@_friendly
 def wizard_narrate(prompt: str, model: str, language: str, duration: float,
                    session: Dict[str, Any]) -> Tuple[str, str, str, Any]:
     """Step 1: prompt -> narration script + subtitles advice + reading-time duration."""
@@ -975,7 +1132,150 @@ def build_ui(workdir: Optional[Path] = None) -> Any:
                                            ai_style, ai_music, session],
                                    outputs=[ai_video_status, ai_video_out])
 
-        with gr.Tab("Video wizard"):
+        with gr.Tab("AI Illustrations"):
+            gr.Markdown("Clips-free flow: the AI writes the narration, describes one "
+                        "illustration per scene, an OpenRouter image model draws them, and "
+                        "each picture is **animated into a looping GIF** (Ken Burns move, "
+                        "drawn locally — no ffmpeg needed) with **text, frames and symbols "
+                        "in superimposition** (cards drawn locally from the overlay plan). "
+                        "Needs `OPENROUTER_API_KEY`; `[ optional: cairosvg ]` when an image "
+                        "model returns SVG.")
+            with gr.Accordion("Step 1 — Prompt and narration", open=True):
+                ill_prompt = gr.Textbox(label="Prompt of the video to build", lines=2,
+                                        placeholder="Es.: video didattico sul compostaggio "
+                                                    "fai-da-te con pallet di legno")
+                with gr.Row():
+                    ill_language = gr.Dropdown(choices=LANGUAGES, value="auto",
+                                               label="Language")
+                    ill_duration = gr.Slider(15, 300, value=60, step=5,
+                                             label="Target duration (s) — the reading time "
+                                                   "of the narration after step 1")
+                ill_model = gr.Dropdown(choices=["best value (auto)"] + DEFAULT_MODELS,
+                                        value="best value (auto)", allow_custom_value=True,
+                                        label="Model (OpenRouter, text)")
+                ill_narrate_button = gr.Button("1. Write the narration", variant="primary")
+                ill_narrate_status = gr.Markdown()
+                ill_narration = gr.Textbox(label="Narration (editable, one paragraph per "
+                                                 "scene)", lines=8)
+                ill_subtitles = gr.Markdown()
+                ill_reading = gr.Markdown()
+            with gr.Accordion("Step 2 — Describe each illustration", open=False):
+                ill_describe_button = gr.Button("2. Describe what each illustration shows",
+                                                variant="primary")
+                ill_describe_status = gr.Markdown()
+                ill_descs = gr.Textbox(label="Illustration prompts (one per line, editable)",
+                                       lines=5,
+                                       placeholder="A wooden pallet compost bin in a "
+                                                   "sunny backyard, wide view...")
+            with gr.Accordion("Step 3 — Generate the illustrations", open=False):
+                with gr.Row():
+                    ill_image_model = gr.Dropdown(choices=list(ILLUSTRATION_MODELS),
+                                                  value=ILLUSTRATION_MODELS[0],
+                                                  allow_custom_value=True,
+                                                  label="Image model (OpenRouter)")
+                    ill_style = gr.Dropdown(choices=list(ILLUSTRATION_STYLES),
+                                            value="Infografica illustrata",
+                                            label="Style (from the generator presets)")
+                with gr.Row():
+                    ill_extra = gr.Textbox(label="Extra style details (optional)", lines=1,
+                                           placeholder="Es. tratti irregolari, colori a "
+                                                       "pastello")
+                    ill_aspect = gr.Radio(choices=["16:9", "1:1", "9:16"], value="16:9",
+                                          label="Aspect ratio")
+                ill_gen_button = gr.Button("3. Generate the illustrations (image model, "
+                                           "paid)", variant="primary")
+                ill_gen_status = gr.Markdown()
+                ill_stills_files = gr.Files(label="Illustrations (stills)")
+            with gr.Accordion("Step 4 — Design texts, icons and frames", open=False):
+                ill_overlay_button = gr.Button("4. Design the overlay texts and symbols",
+                                               variant="primary")
+                ill_overlay_status = gr.Markdown()
+                ill_overlay_table = gr.Dataframe(headers=["Scene", "Title", "Points",
+                                                          "Icons"],
+                                                 label="Overlay elements (drawn locally "
+                                                       "over each GIF)")
+            with gr.Accordion("Step 5 — Animate into GIFs", open=False):
+                with gr.Row():
+                    ill_motion = gr.Dropdown(choices=MOTIONS, value="push-in",
+                                             label="Movement (Ken Burns, loops forever)")
+                    ill_card_style = gr.Dropdown(choices=list(CARD_STYLES), value="Scuro",
+                                                 label="Card style (text, icons, lines)")
+                ill_cards = gr.Checkbox(value=True,
+                                        label="Show the text card in superimposition on "
+                                              "each illustration")
+                ill_animate_button = gr.Button("5. Animate into GIFs (local, free)",
+                                               variant="primary")
+                ill_animate_status = gr.Markdown()
+                ill_gifs = gr.Files(label="Animated GIF slides (loop)")
+            with gr.Accordion("Step 6 — Script", open=False):
+                ill_script_button = gr.Button("6. Build the script", variant="primary")
+                ill_script_status = gr.Markdown()
+                ill_script = gr.Textbox(label="Final script (editable)", lines=8)
+            with gr.Accordion("Step 7 — Preview and final video", open=False):
+                with gr.Row():
+                    ill_vertical = gr.Checkbox(value=False, label="Vertical 9:16")
+                    ill_caption_style = gr.Dropdown(choices=["auto", "tiktok", "bold",
+                                                             "clean", "minimal", "box",
+                                                             "none"],
+                                                    value="auto",
+                                                    label="Caption style ('none' = no "
+                                                          "captions)")
+                    ill_music = gr.Dropdown(choices=["", "ambient", "pulse"], value="ambient",
+                                            label="Background music")
+                with gr.Row():
+                    ill_voice = gr.Dropdown(choices=[], label="Narrator voice",
+                                            allow_custom_value=True)
+                    ill_voices_button = gr.Button("Load voices")
+                with gr.Row():
+                    ill_transition = gr.Radio(choices=["mix", "fade", "slide", "zoom",
+                                                       "cut"], value="mix",
+                                              label="Animation between one GIF and the "
+                                                    "next")
+                    ill_transition_time = gr.Slider(0, 1.5, value=0.5, step=0.1,
+                                                    label="Transition duration (s)")
+                ill_preview_button = gr.Button("7. Quick preview (silent, fast, low "
+                                               "resolution)")
+                ill_preview_status = gr.Markdown()
+                ill_preview_out = gr.Video(label="Preview draft")
+                ill_render_button = gr.Button("8. Render final video", variant="primary")
+                ill_render_status = gr.Markdown()
+                ill_render_out = gr.Video(label="Final video")
+
+            ill_narrate_button.click(wizard_narrate,
+                                     inputs=[ill_prompt, ill_model, ill_language,
+                                             ill_duration, session],
+                                     outputs=[ill_narrate_status, ill_narration,
+                                              ill_subtitles, ill_duration])
+            ill_narration.change(reading_time, inputs=ill_narration,
+                                 outputs=[ill_reading, ill_duration])
+            ill_describe_button.click(ill_describe,
+                                      inputs=[ill_narration, ill_prompt, ill_model,
+                                              session],
+                                      outputs=[ill_describe_status, ill_descs])
+            ill_gen_button.click(ill_generate,
+                                 inputs=[ill_image_model, ill_style, ill_extra, ill_aspect,
+                                         ill_descs, session],
+                                 outputs=[ill_gen_status, ill_stills_files])
+            ill_overlay_button.click(ill_overlays,
+                                     inputs=[ill_narration, ill_prompt, ill_model, session],
+                                     outputs=[ill_overlay_status, ill_overlay_table])
+            ill_animate_button.click(ill_animate,
+                                     inputs=[ill_motion, ill_cards, ill_card_style, session],
+                                     outputs=[ill_animate_status, ill_gifs])
+            ill_script_button.click(ill_build_script, inputs=[ill_narration, session],
+                                    outputs=[ill_script_status, ill_script])
+            ill_voices_button.click(voice_choices, inputs=[provider], outputs=[ill_voice])
+            ill_preview_button.click(clip_preview,
+                                     inputs=[ill_script, ill_vertical, session],
+                                     outputs=[ill_preview_status, ill_preview_out])
+            ill_render_button.click(clip_render,
+                                    inputs=[ill_script, provider, ill_language, speed,
+                                            ill_voice, ill_vertical, ill_caption_style,
+                                            ill_music, ill_transition, ill_transition_time,
+                                            session],
+                                    outputs=[ill_render_status, ill_render_out])
+
+
             gr.Markdown("Guided flow, one step at a time: the AI writes the narration from "
                         "your prompt, you pick the voice (the video duration follows the "
                         "reading time), the AI describes what each scene should show, you "
